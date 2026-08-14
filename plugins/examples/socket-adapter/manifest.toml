@@ -1,0 +1,34 @@
+schema_version = 1
+
+[plugin]
+id = "org.reginux.example.socket"
+name = "Unix Socket Status"
+version = "1.0.0"
+kind = "adapter"
+description = "Template for a line-framed, same-user Unix socket status endpoint."
+
+[transport]
+kind = "unix_socket"
+endpoint = "${XDG_RUNTIME_DIR}/reginux-example.sock"
+peer = "self"
+
+[operations.snapshot]
+request = "status"
+framing = "line"
+decoder = "json"
+timeout_ms = 1000
+
+[[nodes]]
+id = "service"
+kind = "resource"
+label = "/name"
+collection = "/services"
+key = "/id"
+description = "Service state returned by the declared local IPC endpoint."
+
+[[nodes.fields]]
+id = "state"
+label = "State"
+type = "string"
+value = "/state"
+read_only = true

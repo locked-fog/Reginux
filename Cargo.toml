@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/reginux-core",
+    "crates/reginux-tui",
+]
+resolver = "2"
+

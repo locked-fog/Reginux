@@ -1,0 +1,35 @@
+schema_version = 1
+
+[plugin]
+id = "org.reginux.example.clock"
+name = "Clock Status"
+version = "1.0.0"
+kind = "adapter"
+description = "Read-only command Adapter demonstrating JSON snapshot decoding."
+
+[transport]
+kind = "command"
+program = "/usr/bin/date"
+
+[operations.snapshot]
+args = ['+[{"id":"local","current":"%FT%T%:z"}]']
+decoder = "json"
+timeout_ms = 1000
+
+[operations.snapshot.decoder_config]
+collection = "clocks"
+
+[[nodes]]
+id = "clock"
+kind = "resource"
+label = "/id"
+collection = "/clocks"
+key = "/id"
+description = "A clock returned by the declared command provider."
+
+[[nodes.fields]]
+id = "current_time"
+label = "Current local time"
+type = "string"
+value = "/current"
+read_only = true

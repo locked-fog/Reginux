@@ -1,0 +1,28 @@
+schema_version = 1
+
+[plugin]
+id = "org.reginux.example.neovim"
+name = "Neovim static options"
+version = "1.0.0"
+kind = "transform"
+description = "Sandboxed Lua Transform for a small, static subset of init.lua."
+
+[sources.init_lua]
+path = "${XDG_CONFIG_HOME}/nvim/init.lua"
+format = "lua"
+scope = "user"
+max_bytes = 1048576
+
+[transform]
+script = "transform.lua"
+decode_entrypoint = "decode"
+plan_entrypoint = "plan"
+
+[fields.editor.tabstop]
+source = "init_lua"
+binding = "editor.tabstop"
+label = "Tab width"
+type = "integer"
+description = "A direct numeric vim.o.tabstop assignment."
+min = 1
+max = 32

@@ -1,0 +1,121 @@
+# Reginux user configuration
+# Copy to ~/.config/reginux/config.toml or run reginux --reset-keybindings.
+
+[interface]
+show_key_hints = true
+key_sequence_timeout_ms = 500
+confirm_before_apply = true
+default_view = "form"
+
+[editor]
+command = "vim {file}"
+use_environment_editor = false
+
+[safety]
+backup_before_apply = true
+allow_system_writes = false
+
+[plugins]
+directories = [
+  "~/.local/share/reginux/plugins",
+  "/usr/share/reginux/plugins",
+]
+# Copy the exact sha256 token shown in the Plugins view. A manifest, script,
+# or Adapter executable change invalidates the approval.
+approved_adapters = {}
+approved_transforms = {}
+
+[keybindings.global]
+"Esc" = "application.back"
+"/" = "search.open"
+"n" = "search.next"
+"N" = "search.previous"
+"Tab" = "view.next"
+"Ctrl+s" = "changes.apply"
+"u" = "changes.undo"
+"?" = "help.keybindings"
+"]s" = "scope.next"
+"[s" = "scope.previous"
+"q" = "application.back"
+"Q" = "application.quit"
+
+[keybindings.browser]
+"j" = "navigation.down"
+"Down" = "navigation.down"
+"k" = "navigation.up"
+"Up" = "navigation.up"
+"h" = "navigation.left"
+"Left" = "navigation.left"
+"l" = "navigation.right"
+"Right" = "navigation.right"
+"gg" = "navigation.top"
+"G" = "navigation.bottom"
+"Ctrl+u" = "navigation.page_up"
+"Ctrl+d" = "navigation.page_down"
+"Enter" = "navigation.activate"
+"e" = "config.edit"
+"r" = "config.reload"
+"d" = "view.diff"
+"i" = "view.info"
+"p" = "view.plugins"
+
+[keybindings.form]
+"e" = "config.edit"
+"r" = "config.reload"
+"d" = "view.diff"
+"i" = "view.info"
+"Enter" = "navigation.activate"
+
+[keybindings.raw]
+"e" = "config.edit"
+"r" = "config.reload"
+"d" = "view.diff"
+"j" = "navigation.down"
+"Down" = "navigation.down"
+"k" = "navigation.up"
+"Up" = "navigation.up"
+"Ctrl+d" = "navigation.page_down"
+"Ctrl+u" = "navigation.page_up"
+
+[keybindings.diff]
+"]c" = "navigation.down"
+"[c" = "navigation.up"
+"j" = "navigation.down"
+"Down" = "navigation.down"
+"k" = "navigation.up"
+"Up" = "navigation.up"
+"Ctrl+d" = "navigation.page_down"
+"Ctrl+u" = "navigation.page_up"
+
+[keybindings.info]
+"j" = "navigation.down"
+"Down" = "navigation.down"
+"k" = "navigation.up"
+"Up" = "navigation.up"
+"Ctrl+d" = "navigation.page_down"
+"Ctrl+u" = "navigation.page_up"
+
+[keybindings.help]
+"j" = "navigation.down"
+"Down" = "navigation.down"
+"k" = "navigation.up"
+"Up" = "navigation.up"
+"Ctrl+d" = "navigation.page_down"
+"Ctrl+u" = "navigation.page_up"
+
+[keybindings.search]
+"Enter" = "navigation.activate"
+
+[keybindings.dialog]
+"Enter" = "navigation.activate"
+
+[keybindings.plugin_manager]
+"j" = "navigation.down"
+"Down" = "navigation.down"
+"k" = "navigation.up"
+"Up" = "navigation.up"
+"Ctrl+d" = "navigation.page_down"
+"Ctrl+u" = "navigation.page_up"
+"a" = "plugin.approve"
+"x" = "plugin.revoke"
+"r" = "config.reload"

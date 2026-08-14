@@ -1,0 +1,39 @@
+schema_version = 1
+
+[plugin]
+id = "org.reginux.example.dbus"
+name = "D-Bus Broker Identity"
+version = "1.0.0"
+kind = "adapter"
+description = "Read the current session bus identity through the built-in D-Bus transport."
+
+[transport]
+kind = "dbus"
+bus = "session"
+service = "org.freedesktop.DBus"
+object_path = "/org/freedesktop/DBus"
+interface = "org.freedesktop.DBus"
+
+[operations.snapshot]
+member = "GetId"
+reply_type = "string"
+decoder = "single_record"
+timeout_ms = 1000
+
+[operations.snapshot.decoder_config]
+collection = "brokers"
+
+[[nodes]]
+id = "broker"
+kind = "resource"
+label = "/id"
+collection = "/brokers"
+key = "/id"
+description = "Identity reported by the user session D-Bus broker."
+
+[[nodes.fields]]
+id = "identity"
+label = "Broker identity"
+type = "string"
+value = "/value"
+read_only = true

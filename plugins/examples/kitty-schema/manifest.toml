@@ -1,0 +1,59 @@
+schema_version = 1
+
+[plugin]
+id = "org.reginux.example.kitty"
+name = "Kitty"
+version = "1.0.0"
+kind = "schema"
+description = "Declarative Kitty settings with include-file discovery."
+
+[sources.main]
+path = "${XDG_CONFIG_HOME}/kitty/kitty.conf"
+format = "kitty"
+scope = "user"
+max_bytes = 1048576
+
+[sources.main.imports]
+keyword = "include"
+syntax = "shell_words"
+relative_to = "including_file"
+glob = true
+recursive = true
+max_depth = 16
+max_files = 128
+allowed_roots = ["${XDG_CONFIG_HOME}/kitty"]
+
+[fields.appearance.font_size]
+source = "main"
+key = "font_size"
+label = "Font size"
+type = "float"
+description = "Default font size in points."
+min = 6
+max = 72
+default = 11
+write_target = "origin"
+insert = "end"
+
+[fields.appearance.background_opacity]
+source = "main"
+key = "background_opacity"
+label = "Background opacity"
+type = "float"
+description = "Opacity from 0.0 to 1.0."
+min = 0
+max = 1
+default = 1
+write_target = "origin"
+insert = "end"
+
+[fields.behavior.confirm_os_window_close]
+source = "main"
+key = "confirm_os_window_close"
+label = "Confirm window close"
+type = "enum"
+description = "Kitty's close confirmation policy."
+values = ["0", "1", "2"]
+default = "0"
+write_target = "origin"
+insert = "end"
