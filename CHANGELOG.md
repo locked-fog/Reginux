@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.0 — 2026-08-14
+
+### 稳定版发布
+
+- 将 Reginux Core、TUI、CLI 和发布文档统一为 `1.0.0`；插件 `schema_version = 1`
+  协议保持兼容。
+- 增加可重复的 Linux 构建归档、SHA-256 校验和、CycloneDX 1.5 SBOM 与构件验证脚本。
+- CI 增加 release 构建、release 测试、CLI 启动检查，并在能力受限时将 Landlock、D-Bus
+  和 Unix socket 集成测试从“跳过”提升为发布门禁失败。
+- 固化 v1.0.0 支持范围、平台前提、兼容性规则、发布清单和人工验收记录格式。
+
+### 兼容性承诺
+
+- `schema_version = 1` 的现有插件清单继续受支持；未知字段按既有拒绝策略处理。
+- 1.0.x 只接受向后兼容的插件协议和配置迁移；破坏性协议变更进入新的主版本。
+- Command Adapter 必须配套 `reginux-sandbox`，系统写入必须配套 root-owned helper 与
+  polkit policy；平台不具备必要安全能力时不会降级执行。
+
 ## 0.4.0 — 2026-08-12
 
 ### 完整插件运行时

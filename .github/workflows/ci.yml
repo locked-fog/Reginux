@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -16,3 +19,36 @@ jobs:
           components: rustfmt,clippy
       - name: Run checks
         run: ./scripts/check.sh
+
+  release-build:
+    name: Release build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace --bins
+      - name: Run release tests
+        run: cargo test --release --locked --workspace
+      - name: Verify CLI version and help
+        run: |
+          test "$(./target/release/reginux --version)" = "reginux 1.0.0"
+          ./target/release/reginux --help >/dev/null
+
+  host-integration:
+    name: Required Linux security and IPC integration
+    runs-on: ubuntu-latest
+    env:
+      REGINUX_REQUIRE_SANDBOX: "1"
+      REGINUX_REQUIRE_HOST_INTEGRATION: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Confirm D-Bus daemon is available
+        run: dbus-daemon --version
+      - name: Run plugin integration tests without capability skips
+        run: cargo test --locked -p reginux-core --lib plugin::tests -- --nocapture

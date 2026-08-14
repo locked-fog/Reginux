@@ -1,10 +1,13 @@
-# Reginux 0.4.0 发布说明
+# Reginux 1.0.0 发布说明
 
 ## 结论
 
-0.4.0 完成插件系统 v1 的运行时重构。Schema、Command/D-Bus/Unix Socket Adapter、
-Lua Transform、审批/撤销、失效快照、冲突拒绝、强制命令隔离和 polkit 系统写入均
-进入同一 staged/Diff/Apply/verify 流程，可作为插件 v1 发布基线。
+1.0.0 是首个稳定发布。Schema、Command/D-Bus/Unix Socket Adapter、Lua Transform、
+审批/撤销、失效快照、冲突拒绝、强制命令隔离和 polkit 系统写入均进入同一
+staged/Diff/Apply/verify 流程；插件 `schema_version = 1` 协议在 1.0.x 内保持兼容。
+
+发布判断必须同时满足：源码和二进制构件可复现生成、版本和归档内容自动校验、依赖
+清单随构件发布、release 构建与测试通过，以及 Linux 安全/IPC 能力测试没有被静默跳过。
 
 ## 支持矩阵
 
@@ -23,7 +26,7 @@ Lua Transform、审批/撤销、失效快照、冲突拒绝、强制命令隔离
 | 系统文件事务 | polkit helper 集合事务、重新授权、系统备份和回滚 |
 | 冲突处理 | 重复插件/字段/写目标全部禁用并诊断 |
 
-## 与 0.3.0 的兼容性
+## 与 0.4.0 的兼容性
 
 - Rust crate 和 manifest `schema_version` 仍为 v1；
 - 缺失字段的新 Schema 必须增加 `insert = "end"` 或 `insert = "section"`；
@@ -32,17 +35,28 @@ Lua Transform、审批/撤销、失效快照、冲突拒绝、强制命令隔离
 - Command Adapter 安装时必须同时部署 `reginux-sandbox`；
 - 系统写入需安装 helper/polkit，不再由普通 TUI 进程尝试直接写入。
 
+1.0.x 的兼容性范围：插件 manifest `schema_version = 1`、Core 的 staged/Diff/Apply/verify
+边界和现有五个示例插件保持兼容；新增字段必须有安全的拒绝或默认语义。破坏性协议、
+权限模型或写回语义变更必须进入 2.0.0，并提供迁移说明。
+
 ## 发布门禁
 
 ```bash
 ./scripts/check.sh
 cargo build --release --locked --workspace
 cargo run -q -p reginux-tui --bin reginux -- --help
+./scripts/release.sh 1.0.0 /tmp/reginux-release
+./scripts/verify-release.sh /tmp/reginux-release 1.0.0
 ```
 
 归档必须包含 `Cargo.toml`、`Cargo.lock`、crates、resources、scripts、config、docs、
-五个示例插件、LICENSE 和 CHANGELOG；不得包含 target、本地工具链、用户配置、备份
-或 working copy。
+五个示例插件、LICENSE 和 CHANGELOG；二进制归档还必须包含 `reginux`、
+`reginux-sandbox`、`reginux-helper`、版本清单、CycloneDX SBOM 和 SHA-256 校验和；不得
+包含 target、本地工具链、用户配置、备份或 working copy。
+
+`scripts/release.sh` 只接受干净的 Git 工作树，使用锁定依赖构建当前平台构件，并生成
+源码归档、二进制归档、`SHA256SUMS`、构建清单和 CycloneDX 1.5 SBOM。发布前必须使用
+`scripts/verify-release.sh` 在独立临时目录解包并验证文件、版本和校验和。
 
 ## 人工验收
 

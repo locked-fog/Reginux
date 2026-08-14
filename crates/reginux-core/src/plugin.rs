@@ -3596,6 +3596,9 @@ mod tests {
                         .to_string()
                         .contains("Landlock policy was not fully enforced") =>
             {
+                if std::env::var_os("REGINUX_REQUIRE_SANDBOX").is_some() {
+                    panic!("required command sandbox is unavailable: {error}");
+                }
                 false
             }
             Err(error) => panic!("unexpected sandbox probe failure: {error}"),
@@ -4274,6 +4277,9 @@ end
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 fs::remove_dir_all(root).unwrap();
+                if std::env::var_os("REGINUX_REQUIRE_HOST_INTEGRATION").is_some() {
+                    panic!("required Unix socket integration is unavailable: {error}");
+                }
                 return;
             }
             Err(error) => panic!("bind test Unix socket: {error}"),
@@ -4383,6 +4389,9 @@ end
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 fs::remove_dir_all(root).unwrap();
+                if std::env::var_os("REGINUX_REQUIRE_HOST_INTEGRATION").is_some() {
+                    panic!("required Unix socket compensation integration is unavailable: {error}");
+                }
                 return;
             }
             Err(error) => panic!("bind compensation test Unix socket: {error}"),
@@ -4455,6 +4464,12 @@ end
         if !output.status.success()
             && String::from_utf8_lossy(&output.stderr).contains("Operation not permitted")
         {
+            if std::env::var_os("REGINUX_REQUIRE_HOST_INTEGRATION").is_some() {
+                panic!(
+                    "required D-Bus integration is unavailable: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             return;
         }
         assert!(

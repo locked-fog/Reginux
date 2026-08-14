@@ -1,4 +1,4 @@
-# Reginux 0.4.0
+# Reginux 1.0.0
 
 Reginux 是一个以现有 Linux 配置和应用控制面为事实来源的 Rust TUI。它把分散的
 文件、CLI、D-Bus 和 Unix socket 状态投影为统一条目，并通过“读取、暂存、校验、
@@ -6,7 +6,7 @@ Reginux 是一个以现有 Linux 配置和应用控制面为事实来源的 Rust
 
 > The registry Linux never needed — without becoming a registry.
 
-## 0.4.0 能力
+## 1.0.0 能力
 
 - 纯 Rust Core、Ratatui 前端、沙箱 launcher、polkit helper 与测试；
 - hostname、locale、environment、sysctl、hosts 内建 Provider；
@@ -79,10 +79,14 @@ shell 或自由路径。
 ```bash
 ./scripts/check.sh
 cargo build --release --locked --workspace
+cargo test --release --locked --workspace
+cargo run -q -p reginux-tui --bin reginux -- --version
 ```
 
 `scripts/check.sh` 执行格式检查、workspace 编译、全部测试、`-D warnings` Clippy、
-安装脚本语法和示例命令检查。
+安装脚本语法和示例命令检查。发布构件使用 `scripts/release.sh` 生成，并由
+`scripts/verify-release.sh` 校验归档内容、版本、SHA-256 和 CycloneDX SBOM；完整门禁
+见 `docs/RELEASE.md`。
 
 ```text
 crates/reginux-core/       模型、Provider、插件、沙箱、授权与事务引擎

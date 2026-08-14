@@ -1,6 +1,6 @@
 # Reginux 插件系统设计方案 v1
 
-状态：0.4.0 已实现的 v1 规范  
+状态：1.0.0 已实现并冻结的 v1 规范
 适用范围：Reginux Core、TUI，以及未来 CLI/GUI 前端  
 本文不规定具体 Rust 类型或实现顺序；它定义插件系统应遵循的稳定边界与用户可见行为。
 
@@ -545,7 +545,7 @@ Staged Changes → Planner → Plan → Core Transaction 或 Adapter Execution �
 
 ## 13. v1 固定决策
 
-0.4.0 已将原开放问题固定为以下协议，不再由单个插件自行选择：
+1.0.0 已将原开放问题固定为以下协议，不再由单个插件自行选择：
 
 1. 路径变量白名单为 `HOME`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、
    `XDG_DATA_HOME`、`XDG_RUNTIME_DIR`；system source 不借用 root HOME。

@@ -1,4 +1,4 @@
-# Reginux 插件规范 v1（0.4.0）
+# Reginux 插件规范 v1（Reginux 1.0.0）
 
 本文是插件作者文档。`docs/PLUGIN-SYSTEM-DESIGN-V1.md` 解释设计原则；本文给出当前
 Rust 实现接受的 manifest、运行语义和示例。

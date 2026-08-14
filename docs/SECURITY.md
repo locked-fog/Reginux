@@ -1,4 +1,4 @@
-# Reginux 0.4.0 安全模型
+# Reginux 1.0.0 安全模型
 
 ## 总原则
 
@@ -98,7 +98,7 @@ Command 程序任一变化都会失效。用户可在 TUI 查看权限后批准�
 
 ## 平台要求
 
-Reginux 0.4.0 的 Command Adapter 要求 Linux 提供可由非特权进程使用的 Landlock
+Reginux 1.0.0 的 Command Adapter 要求 Linux 提供可由非特权进程使用的 Landlock
 ABI V3 和 seccomp。容器或宿主若通过外层 seccomp 禁止 Landlock/socket，相关
 Adapter 会明确失败关闭；这属于运行平台拒绝所需内核能力，不会触发不安全降级。
 文件 Schema、Transform 和无需被宿主禁止能力的功能仍可使用。
