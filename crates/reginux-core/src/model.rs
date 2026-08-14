@@ -52,6 +52,27 @@ pub enum SourceScope {
     System,
 }
 
+/// A declared configuration source shown by the file-oriented browser.
+///
+/// This is intentionally derived only from built-in providers and plugin
+/// manifests.  It is not a directory scan result, so a missing declared file
+/// can still be selected and created through the normal transaction flow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigFile {
+    pub path: PathBuf,
+    pub scope: SourceScope,
+    pub providers: Vec<String>,
+    pub entry_count: usize,
+    pub exists: bool,
+    pub editable: bool,
+}
+
+impl ConfigFile {
+    pub fn display_path(&self) -> String {
+        clean_display_text(&self.path.display().to_string())
+    }
+}
+
 impl SourceScope {
     pub fn as_str(&self) -> &'static str {
         match self {

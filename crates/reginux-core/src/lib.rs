@@ -20,8 +20,8 @@ pub use catalog::{Catalog, DiscoverOptions, PluginSummary};
 pub use config::{load_app_config, reset_keybindings, AppConfig, ConfigLoad};
 pub use keybindings::{Action, KeySequence, KeyStroke, Keymap};
 pub use model::{
-    clean_display_text, Backend, ConfigEntry, EditCapability, Privilege, SourceRef, SourceScope,
-    TransactionGuarantee, ValueType,
+    clean_display_text, Backend, ConfigEntry, ConfigFile, EditCapability, Privilege, SourceRef,
+    SourceScope, TransactionGuarantee, ValueType,
 };
 pub use transaction::{
     AdapterChangeSummary, ApplyReport, ChangeSummary, Transaction, ValidationIssue,

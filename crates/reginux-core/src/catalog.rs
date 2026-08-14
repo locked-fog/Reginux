@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::AppConfig;
-use crate::filesystem::{config_dir, home_dir, is_system_path, read_regular_file_limited};
+use crate::filesystem::config_dir;
 use crate::model::{
-    Backend, ConfigEntry, EditCapability, Privilege, SourceRef, SourceScope, ValueType,
+    Backend, ConfigEntry, ConfigFile, EditCapability, Privilege, SourceRef, SourceScope, ValueType,
 };
 use crate::plugin::{discover_plugins, PluginPolicy};
 use crate::provider::{builtin_providers, ProviderContext};
@@ -16,6 +15,8 @@ pub struct DiscoverOptions {
     pub app_config: AppConfig,
     pub plugin_directories: Vec<String>,
     pub plugin_policy: PluginPolicy,
+    /// Kept for API compatibility. Generic directory scanning is removed;
+    /// only built-in and manifest-declared sources are indexed.
     pub include_generic_files: bool,
 }
 
@@ -38,6 +39,7 @@ impl Default for DiscoverOptions {
 
 pub struct Catalog {
     pub entries: Vec<ConfigEntry>,
+    pub files: Vec<ConfigFile>,
     pub plugins: Vec<PluginSummary>,
     pub diagnostics: Vec<String>,
 }
@@ -65,13 +67,9 @@ impl Catalog {
         entries.extend(plugin_discovery.entries);
         diagnostics.extend(plugin_discovery.diagnostics);
 
-        if options.include_generic_files {
-            let known_sources = entries
-                .iter()
-                .filter_map(|entry| entry.source_path().map(Path::to_path_buf))
-                .collect::<HashSet<_>>();
-            entries.extend(generic_file_entries(&known_sources));
-        }
+        // Deliberately do not scan configuration directories here.  Only
+        // built-in providers and plugin-declared sources are allowed to enter
+        // the catalog; see `config_files` below for the file-oriented index.
 
         let id_counts = entries.iter().fold(HashMap::new(), |mut counts, entry| {
             *counts.entry(entry.id.clone()).or_insert(0usize) += 1;
@@ -109,6 +107,7 @@ impl Catalog {
                 == 1
         });
 
+        let files = config_files(&entries);
         let plugins = plugin_discovery.summaries;
 
         entries.sort_by(|left, right| {
@@ -119,6 +118,7 @@ impl Catalog {
         });
         Self {
             entries,
+            files,
             plugins,
             diagnostics,
         }
@@ -182,6 +182,7 @@ impl Catalog {
                 .then_with(|| left.label.cmp(&right.label))
                 .then_with(|| left.id.cmp(&right.id))
         });
+        self.files = config_files(&self.entries);
     }
 }
 
@@ -390,196 +391,33 @@ fn toml_entry(
     }
 }
 
-fn generic_file_entries(known_sources: &HashSet<PathBuf>) -> Vec<ConfigEntry> {
-    let mut result = Vec::new();
-    let mut seen = known_sources.clone();
-    scan_tree(
-        &home_dir().join(".config"),
-        &home_dir().join(".config"),
-        "Config Files / User",
-        3,
-        120,
-        &mut seen,
-        &mut result,
-    );
-    scan_tree(
-        Path::new("/etc"),
-        Path::new("/etc"),
-        "Config Files / System",
-        2,
-        120,
-        &mut seen,
-        &mut result,
-    );
-    result
-}
-
-fn scan_tree(
-    scan_root: &Path,
-    directory: &Path,
-    section: &str,
-    max_depth: usize,
-    limit: usize,
-    seen: &mut HashSet<PathBuf>,
-    output: &mut Vec<ConfigEntry>,
-) {
-    if output.len() >= limit || !directory.is_dir() || is_sensitive_path(directory) {
-        return;
-    }
-    let Ok(items) = fs::read_dir(directory) else {
-        return;
-    };
-    let mut paths = items
-        .filter_map(|item| item.ok().map(|item| item.path()))
-        .collect::<Vec<_>>();
-    paths.sort();
-    for path in paths {
-        if output.len() >= limit {
-            break;
-        }
-        if path.is_dir() {
-            if max_depth > 0 {
-                scan_tree(
-                    scan_root,
-                    &path,
-                    section,
-                    max_depth - 1,
-                    limit,
-                    seen,
-                    output,
-                );
-            }
+fn config_files(entries: &[ConfigEntry]) -> Vec<ConfigFile> {
+    let mut grouped = BTreeMap::<PathBuf, ConfigFile>::new();
+    for entry in entries {
+        let Some(path) = entry.source_path() else {
             continue;
-        }
-        if !is_safe_generic_text_file(&path) || !seen.insert(path.clone()) {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(scan_root)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
-        let privilege = if is_system_path(&path) {
-            Privilege::System
-        } else {
-            Privilege::User
         };
-        let (edit_capability, effective_privilege, backend) = if privilege == Privilege::System {
-            (
-                EditCapability::None,
-                Privilege::ReadOnly,
-                Backend::ReadOnly {
-                    reason: "generic system files have no privileged authorization policy; install a trusted Schema plugin"
-                        .to_owned(),
-                },
-            )
-        } else {
-            (
-                EditCapability::File,
-                privilege.clone(),
-                Backend::WholeFile { path: path.clone() },
-            )
-        };
-        output.push(ConfigEntry {
-            id: format!(
-                "files.{}.{}",
-                if privilege == Privilege::System {
-                    "system"
-                } else {
-                    "user"
-                },
-                path.to_string_lossy().replace('/', ".")
-            ),
-            label: relative.clone(),
-            section: section.to_owned(),
-            description: format!("Generic raw configuration file at {}.", path.display()),
-            value: "Raw file".to_owned(),
-            default_value: None,
-            value_type: ValueType::Raw,
-            source: SourceRef::file(
-                "generic",
-                path.clone(),
-                if privilege == Privilege::System {
+        let file = grouped
+            .entry(path.to_path_buf())
+            .or_insert_with(|| ConfigFile {
+                path: path.to_path_buf(),
+                scope: if entry.source.is_system() {
                     SourceScope::System
                 } else {
                     SourceScope::User
                 },
-            ),
-            edit_capability,
-            privilege: effective_privilege,
-            provider: "generic.files".to_owned(),
-            validation: "UTF-8 text without NUL bytes".to_owned(),
-            backend,
-            metadata: vec![
-                ("relative".to_owned(), relative),
-                ("generic".to_owned(), "true".to_owned()),
-            ],
-        });
+                providers: Vec::new(),
+                entry_count: 0,
+                exists: path.exists(),
+                editable: false,
+            });
+        if !file.providers.contains(&entry.provider) {
+            file.providers.push(entry.provider.clone());
+        }
+        file.entry_count += 1;
+        file.editable |= entry.is_editable();
     }
-}
-
-fn is_safe_generic_text_file(path: &Path) -> bool {
-    const MAX_GENERIC_FILE_SIZE: u64 = 1024 * 1024;
-
-    if is_sensitive_path(path) {
-        return false;
-    }
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > MAX_GENERIC_FILE_SIZE
-    {
-        return false;
-    }
-    let blocked_extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "db" | "sqlite"
-                    | "sqlite3"
-                    | "key"
-                    | "pem"
-                    | "p12"
-                    | "pfx"
-                    | "der"
-                    | "crt"
-                    | "lock"
-                    | "sock"
-                    | "bin"
-            )
-        });
-    if blocked_extension {
-        return false;
-    }
-    read_regular_file_limited(path, MAX_GENERIC_FILE_SIZE)
-        .ok()
-        .is_some_and(|bytes| !bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok())
-}
-
-fn is_sensitive_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        matches!(
-            value.as_str(),
-            "shadow"
-                | "shadow-"
-                | "gshadow"
-                | "gshadow-"
-                | "secrets"
-                | "secret"
-                | "credentials"
-                | "credential"
-                | "keyrings"
-                | "keyring"
-                | "gnupg"
-        ) || value.contains("password")
-            || value.contains("private_key")
-            || (value.starts_with("ssh_host_") && value.ends_with("_key"))
-    })
+    grouped.into_values().collect()
 }
 
 #[cfg(test)]
@@ -628,16 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn generic_scanning_blocks_sensitive_path_patterns() {
-        assert!(is_sensitive_path(Path::new("/etc/shadow")));
-        assert!(is_sensitive_path(Path::new(
-            "/etc/ssh/ssh_host_ed25519_key"
-        )));
-        assert!(is_sensitive_path(Path::new("/tmp/password-store/config")));
-        assert!(!is_sensitive_path(Path::new("/etc/ssh/sshd_config")));
-    }
-
-    #[test]
     fn cross_provider_source_ownership_disables_every_writer() {
         let path = Path::new("/tmp/shared.conf");
         let mut entries = vec![
@@ -650,6 +478,17 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|message| message.contains("every writer was disabled")));
+    }
+
+    #[test]
+    fn declared_file_index_keeps_missing_sources_without_directory_scan() {
+        let path = PathBuf::from("/tmp/reginux-declared-file-that-does-not-exist");
+        let entries = vec![test_entry("declared", &path, "plugin.test")];
+        let files = config_files(&entries);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, path);
+        assert!(!files[0].exists);
+        assert_eq!(files[0].providers, vec!["plugin.test"]);
     }
 
     #[test]
@@ -667,11 +506,13 @@ mod tests {
         };
         let previous = Catalog {
             entries: vec![entry],
+            files: Vec::new(),
             plugins: vec![test_plugin(id, false)],
             diagnostics: Vec::new(),
         };
         let mut refreshed = Catalog {
             entries: Vec::new(),
+            files: Vec::new(),
             plugins: vec![test_plugin(id, true)],
             diagnostics: Vec::new(),
         };

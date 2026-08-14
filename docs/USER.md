@@ -36,22 +36,22 @@ cargo run -p reginux-tui --bin reginux
 
 ## 3. 首次进入与任务范围
 
-界面由左侧配置列表、右侧内容区、顶部范围/统计和底部状态/快捷键组成。
+界面由左侧来源列表、右侧设置预览、顶部范围/统计和底部状态/快捷键组成。
 
-默认进入 `Overview`，只呈现内建 provider、Reginux 自身项和插件项，避免把
-扫描到的普通文件全部堆到首屏。使用 `[s` / `]s` 在以下范围间切换：
+默认进入 `插件` scope。左侧只展示内置 provider、Reginux 自身配置和已发现的
+插件；`文件` scope 只展示这些来源实际声明过的文件。Reginux 不再扫描
+`~/.config`、`/etc` 或其它目录中的普通文件，因此 log、数据库和专用格式文件
+不会污染条目。使用 `[s` / `]s` 在以下范围间切换：
 
 | 范围 | 用途 |
 |---|---|
-| Overview | 常用内建项（不展开环境变量）、Reginux 与插件项 |
-| System | hostname、locale、environment、sysctl、hosts 等 |
-| Applications | 应用及插件提供的配置 |
-| Reginux | 界面、编辑器、安全和插件策略 |
-| Config files | `~/.config` 与 `/etc` 中通过安全过滤的普通文本文件 |
+| 插件 | 按插件/provider 分组；右侧列出该来源的全部设置 |
+| 文件 | 按真实文件路径分组；右侧列出该文件被声明的全部设置 |
 
-`/` 搜索会跨全部条目。按 Enter 保留结果并进入 `Search results`；Esc 取消并
-恢复原范围、列表位置。普通文件扫描跳过敏感名称、私钥、符号链接、非普通
-文件、二进制/非 UTF-8 文件以及大于 1 MiB 的文件。
+文件 scope 会保留插件或内置 provider 声明但尚未创建的路径。不存在的默认路径
+使用醒目颜色显示，仍然可以选择并通过 Raw 编辑创建。`/` 搜索会跨全部设置。
+按 Enter 保留结果并进入 `搜索结果`；Esc 取消并恢复原 scope。右侧设置按
+provider 的 section/node 层级缩进，并同时显示当前值预览、类型和 staged 状态。
 
 ## 4. 视图与默认快捷键
 
@@ -62,10 +62,10 @@ j / Down       向下；在长内容视图中向下滚动
 k / Up         向上；在长内容视图中向上滚动
 gg / G         顶部 / 底部
 Ctrl+u/d       向上 / 向下翻页
-h / Left       返回 Form
-l / Right      在 Form 与 Raw 间切换
+h / Left       将焦点移到左侧来源列表
+l / Right      将焦点移到右侧设置列表
 [s / ]s        上一个 / 下一个任务范围
-Enter          激活当前项
+Enter          激活当前焦点；左侧来源会把焦点交给右侧设置
 ~~~
 
 ### 视图和操作
@@ -76,20 +76,21 @@ r              刷新当前来源（文件重读、Adapter refresh、Transform �
 d              Diff
 i              Info
 p              Plugins
-Tab            Form → Raw → Diff → Info → Plugins → Form
+Tab            设置 → Raw → 差异 → 详情 → 插件管理 → 设置
 Ctrl+s         Apply staged changes
 u              撤销最近一次 staged 操作
 ?              完整快捷键表
 Q              退出；存在 staged 变更时要求确认
 ~~~
 
-底部提示来自实际 keymap。用户改变绑定后提示同步改变。Form context 会优先于
-Browser context，同时继承列表导航，不会因为进入 Form 而丢失 `j/k`。
+底部提示来自实际 keymap。用户改变绑定后提示同步改变。底部状态还会显示当前
+焦点是在左侧还是右侧；焦点行会同时改变前景色和背景色，保证文字可读。
 
 ## 5. 编辑体验
 
-### Form
+### 设置与 Form
 
+右侧设置列表是主编辑区域。左侧选中插件或文件后，焦点会自动移动到右侧。
 Form 用于 provider 或 schema 暴露的结构化字段。按 `e` 进入行内编辑：
 
 ~~~text
@@ -103,18 +104,29 @@ Enter          校验并 stage
 Esc            取消，不改变 staged state
 ~~~
 
+Boolean 和 Enum 不再进入开放文本编辑：
+
+~~~text
+↑/↓ 或 h/l      在允许值之间移动
+Enter            暂存当前选项
+Esc              取消
+~~~
+
+数字、字符串、路径等没有有限选项的值仍使用单行编辑器，并继续由核心
+transaction 做类型和范围校验。
+
 结构化写回会尽量保留前导空白、引号风格、行尾注释和未知键。重复键只修改最终
 生效的一项。Locale 的 `<inherit>` 和 schema 的 `<unset>` 会删除对应赋值，
 不会把占位文本写进配置。
 
 ### Raw
 
-Raw 显示当前 staged working state。按 `e` 时：
+Raw 显示当前来源文件的 staged working state。按 `e` 时：
 
 1. 创建权限为 0600 的临时 working copy；
 2. 暂时恢复普通终端并启动外部编辑器；
 3. 编辑器退出后验证临时文件仍是普通文件并读回；
-4. 只把内容 stage 到 transaction；
+4. 只把完整文件内容 stage 到 transaction，而不是只打开某一个字段；
 5. 删除临时文件并恢复 TUI。
 
 外部编辑器绝不直接打开真实 `/etc/...` 文件。命令按参数列表解析，不经过
@@ -235,14 +247,15 @@ Reginux 只写配置文件，不自动重载 daemon、桌面会话或内核参�
 在支持非特权 Landlock ABI V3 和 seccomp 的 Linux 主机运行，或继续使用不执行外部
 程序的 Schema/Transform 功能。
 
-### 文件没有出现在 Config files？
+### 文件没有出现在“文件” scope？
 
-它可能是链接、敏感文件、二进制/非 UTF-8 文件、超过 1 MiB，或超过单次扫描
-上限。使用专用 schema/provider 比通用 Raw 编辑更合适。
+“文件” scope 只显示内置 provider 或插件 manifest 已声明的来源，不扫描目录。
+请使用专用 Schema/provider 声明该文件；普通 log、数据库和专用格式文件不会被
+自动加载。声明的默认路径即使尚不存在也会显示为可选择的醒目路径。
 
 `/etc/environment` 中名称疑似 password/token/secret/credential/auth/cookie/API key
-的变量，以及 URL authority 含 userinfo 的值也不会进入目录，避免在 TUI 中意外
-显示凭据。
+的变量，以及 URL authority 含 userinfo 的值也不会进入设置列表，避免在 TUI 中
+意外显示凭据。
 
 ### 为什么硬链接文件不能编辑？
 

@@ -10,7 +10,8 @@ Reginux 是一个以现有 Linux 配置和应用控制面为事实来源的 Rust
 
 - 纯 Rust Core、Ratatui 前端、沙箱 launcher、polkit helper 与测试；
 - hostname、locale、environment、sysctl、hosts 内建 Provider；
-- Form、Raw、Diff、Info、Plugins、Help 视图，可搜索、可配置 Vim 风格键位；
+- 插件/文件双 scope、右侧设置预览、明确的左右焦点、Raw、Diff、Info、Plugins、Help 视图；
+- Boolean/Enum 选项编辑、缺失声明文件创建、中文界面提示和可配置 Vim 风格键位；
 - 普通文件原子替换、全量与写前冲突复检、备份、失败逆序回滚；
 - 系统文件经 root-owned helper 执行集合级 compare-and-replace 与系统备份；
 - Schema 插件：白名单环境变量、绝对路径、include 图、循环/逃逸检测；
@@ -35,7 +36,7 @@ cargo run -p reginux-tui --bin reginux
 cargo run -p reginux-tui --bin reginux -- --reset-keybindings
 ```
 
-查看五个示例插件：
+查看已验证的示例插件：
 
 ```bash
 cargo run -p reginux-tui --bin reginux -- --plugin-dir plugins/examples

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io::stdout;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -15,7 +15,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
@@ -26,7 +26,7 @@ use reginux_core::filesystem::{is_system_path, read_regular_file, run_editor};
 use reginux_core::keybindings::{Action, KeyStroke, Keymap};
 use reginux_core::plugin::PluginPolicy;
 use reginux_core::{
-    clean_display_text, Catalog, ConfigEntry, DiscoverOptions, Transaction, ValueType,
+    clean_display_text, Catalog, ConfigEntry, ConfigFile, DiscoverOptions, Transaction, ValueType,
 };
 
 #[derive(Debug, Parser)]
@@ -69,53 +69,41 @@ enum View {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
-    Overview,
-    System,
-    Applications,
-    Reginux,
-    ConfigFiles,
+    Plugins,
+    Files,
     Search,
 }
 
 impl Scope {
     fn label(self) -> &'static str {
         match self {
-            Self::Overview => "Overview",
-            Self::System => "System",
-            Self::Applications => "Applications",
-            Self::Reginux => "Reginux",
-            Self::ConfigFiles => "Config files",
-            Self::Search => "Search results",
-        }
-    }
-
-    fn includes(self, entry: &ConfigEntry) -> bool {
-        match self {
-            Self::Overview => {
-                entry.provider != "generic.files" && entry.provider != "linux.environment"
-            }
-            Self::System => entry.section.starts_with("System /"),
-            Self::Applications => entry.section.starts_with("Applications /"),
-            Self::Reginux => entry.section.starts_with("Reginux /"),
-            Self::ConfigFiles => entry.section.starts_with("Config Files /"),
-            Self::Search => true,
+            Self::Plugins => "插件",
+            Self::Files => "文件",
+            Self::Search => "搜索结果",
         }
     }
 
     fn shifted(self, direction: isize) -> Self {
-        const SCOPES: [Scope; 5] = [
-            Scope::Overview,
-            Scope::System,
-            Scope::Applications,
-            Scope::Reginux,
-            Scope::ConfigFiles,
-        ];
+        const SCOPES: [Scope; 2] = [Scope::Plugins, Scope::Files];
         if self == Scope::Search {
-            return Scope::Overview;
+            return Scope::Plugins;
         }
         let current = SCOPES.iter().position(|scope| *scope == self).unwrap_or(0) as isize;
         SCOPES[(current + direction).rem_euclid(SCOPES.len() as isize) as usize]
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Focus {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug)]
+struct PluginGroup {
+    provider: String,
+    representative: Option<usize>,
+    label: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,6 +111,7 @@ enum Mode {
     Normal,
     Search,
     Edit,
+    Select,
     ConfirmApply,
     ConfirmDiscard,
     ConfirmQuit,
@@ -141,17 +130,24 @@ struct App {
     keymap: Keymap,
     transaction: Transaction,
     visible: Vec<usize>,
+    plugin_groups: Vec<PluginGroup>,
+    file_visible: Vec<usize>,
     selected: usize,
+    selected_setting: usize,
+    focus: Focus,
     plugin_selected: usize,
     scope: Scope,
     view: View,
     mode: Mode,
     edit_input: String,
     edit_cursor: usize,
+    edit_options: Vec<String>,
+    edit_option_selected: usize,
     search_input: String,
     search_cursor: usize,
     search_original_visible: Vec<usize>,
     search_original_selected: usize,
+    search_original_scope: Scope,
     status: String,
     warning: Option<String>,
     pending_keys: Vec<KeyStroke>,
@@ -183,21 +179,28 @@ impl App {
         let initial_view = parse_view(&load.config.interface.default_view).unwrap_or(View::Form);
         let mut app = Self {
             visible: Vec::new(),
+            file_visible: Vec::new(),
             catalog,
             config: load.config,
             keymap,
             transaction: Transaction::default(),
             selected: 0,
+            selected_setting: 0,
+            focus: Focus::Left,
+            plugin_groups: Vec::new(),
             plugin_selected: 0,
-            scope: Scope::Overview,
+            scope: Scope::Plugins,
             view: initial_view,
             mode: Mode::Normal,
             edit_input: String::new(),
             edit_cursor: 0,
+            edit_options: Vec::new(),
+            edit_option_selected: 0,
             search_input: String::new(),
             search_cursor: 0,
             search_original_visible: Vec::new(),
             search_original_selected: 0,
+            search_original_scope: Scope::Plugins,
             status: String::new(),
             warning: load.warning,
             pending_keys: Vec::new(),
@@ -215,25 +218,103 @@ impl App {
         } else if !app.catalog.diagnostics.is_empty() {
             app.status = app.catalog.diagnostics.join(" | ");
         } else {
-            app.status = "Ready. Files remain the source of truth.".to_owned();
+            app.status = "就绪。真实配置文件仍是唯一事实来源。".to_owned();
         }
         app
     }
 
     fn selected_entry(&self) -> Option<&ConfigEntry> {
-        self.visible
-            .get(self.selected)
+        self.setting_indices()
+            .get(self.selected_setting)
             .and_then(|index| self.catalog.entries.get(*index))
     }
 
     fn selected_index(&self) -> Option<usize> {
-        self.visible.get(self.selected).copied()
+        self.setting_indices().get(self.selected_setting).copied()
+    }
+
+    fn selected_group_entry(&self) -> Option<&ConfigEntry> {
+        match self.scope {
+            Scope::Files => self.current_file().and_then(|file| {
+                self.catalog
+                    .entries
+                    .iter()
+                    .find(|entry| entry.source_path().is_some_and(|path| path == file.path))
+            }),
+            Scope::Plugins => self
+                .plugin_groups
+                .get(self.selected)
+                .and_then(|group| group.representative)
+                .and_then(|index| self.catalog.entries.get(index)),
+            Scope::Search => self
+                .visible
+                .get(self.selected)
+                .and_then(|index| self.catalog.entries.get(*index)),
+        }
+    }
+
+    fn current_file(&self) -> Option<&ConfigFile> {
+        self.file_visible
+            .get(self.selected)
+            .and_then(|index| self.catalog.files.get(*index))
+    }
+
+    fn setting_indices(&self) -> Vec<usize> {
+        match self.scope {
+            Scope::Files => {
+                let Some(file) = self.current_file() else {
+                    return Vec::new();
+                };
+                self.catalog
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        entry
+                            .source_path()
+                            .is_some_and(|path| path == file.path)
+                            .then_some(index)
+                    })
+                    .collect()
+            }
+            Scope::Plugins => {
+                let Some(group) = self.selected_group_entry() else {
+                    let Some(group) = self.plugin_groups.get(self.selected) else {
+                        return Vec::new();
+                    };
+                    return self
+                        .catalog
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, entry)| {
+                            (entry.provider == group.provider).then_some(index)
+                        })
+                        .collect();
+                };
+                self.catalog
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        (entry.provider == group.provider).then_some(index)
+                    })
+                    .collect()
+            }
+            Scope::Search => self
+                .visible
+                .get(self.selected)
+                .copied()
+                .into_iter()
+                .collect(),
+        }
     }
 
     fn active_contexts(&self) -> &'static [&'static str] {
         match self.mode {
             Mode::Search => &["search"],
             Mode::Edit
+            | Mode::Select
             | Mode::ConfirmApply
             | Mode::ConfirmDiscard
             | Mode::ConfirmQuit
@@ -257,6 +338,7 @@ impl App {
         match self.mode {
             Mode::Search => return self.handle_search_key(event),
             Mode::Edit => return self.handle_edit_key(event),
+            Mode::Select => return self.handle_select_key(event),
             Mode::ConfirmApply
             | Mode::ConfirmDiscard
             | Mode::ConfirmQuit
@@ -321,7 +403,12 @@ impl App {
             "navigation.up" => self.navigate_or_scroll(-1),
             "navigation.top" => {
                 if self.view == View::Form {
-                    self.selected = 0;
+                    if self.focus == Focus::Left {
+                        self.selected = 0;
+                        self.selected_setting = 0;
+                    } else {
+                        self.selected_setting = 0;
+                    }
                 } else if self.view == View::Plugins {
                     self.plugin_selected = 0;
                 } else {
@@ -330,7 +417,12 @@ impl App {
             }
             "navigation.bottom" => {
                 if self.view == View::Form {
-                    self.selected = self.visible.len().saturating_sub(1);
+                    if self.focus == Focus::Left {
+                        self.selected = self.group_count().saturating_sub(1);
+                        self.selected_setting = 0;
+                    } else {
+                        self.selected_setting = self.setting_indices().len().saturating_sub(1);
+                    }
                 } else if self.view == View::Plugins {
                     self.plugin_selected = self.catalog.plugins.len().saturating_sub(1);
                 } else {
@@ -340,27 +432,37 @@ impl App {
             "navigation.page_up" => self.navigate_or_scroll(-10),
             "navigation.page_down" => self.navigate_or_scroll(10),
             "navigation.left" => {
-                self.view = View::Form;
-                self.content_scroll = 0;
-                self.status = "Returned to Form view.".to_owned();
+                if self.view == View::Form {
+                    self.focus = Focus::Left;
+                    self.status = "焦点：左侧插件/文件列表".to_owned();
+                } else {
+                    self.view = View::Form;
+                    self.focus = Focus::Left;
+                    self.content_scroll = 0;
+                    self.status = "已返回设置视图；焦点在左侧列表".to_owned();
+                }
             }
             "navigation.right" => {
-                self.view = if matches!(self.view, View::Form) {
-                    View::Raw
+                if self.view == View::Form {
+                    self.focus = Focus::Right;
+                    self.status = "焦点：右侧设置；e 编辑，Enter 激活".to_owned();
                 } else {
-                    View::Form
-                };
-                self.content_scroll = 0;
+                    self.view = View::Form;
+                    self.focus = Focus::Right;
+                    self.content_scroll = 0;
+                    self.status = "已返回设置视图；焦点在右侧设置".to_owned();
+                }
             }
             "navigation.activate" => {
                 if matches!(self.view, View::Help) {
                     self.view = View::Form;
-                } else if let Some(entry) = self.selected_entry().cloned() {
-                    if entry.value_type == ValueType::Raw {
-                        self.view = View::Raw;
-                    } else {
-                        self.view = View::Form;
-                    }
+                    self.focus = Focus::Left;
+                } else if self.view == View::Form && self.focus == Focus::Left {
+                    self.focus = Focus::Right;
+                    self.selected_setting = 0;
+                    self.status = "已选择；焦点移到右侧设置".to_owned();
+                } else if self.view == View::Form {
+                    return self.start_edit();
                 }
             }
             "view.next" => self.next_view(),
@@ -395,6 +497,7 @@ impl App {
             "search.open" => {
                 self.search_original_visible = self.visible.clone();
                 self.search_original_selected = self.selected;
+                self.search_original_scope = self.scope;
                 self.search_input.clear();
                 self.search_cursor = 0;
                 self.mode = Mode::Search;
@@ -419,6 +522,8 @@ impl App {
                 self.selected = self
                     .search_original_selected
                     .min(self.visible.len().saturating_sub(1));
+                self.scope = self.search_original_scope;
+                self.rebuild_visible_for_scope();
                 self.status = "Search cancelled.".to_owned();
             }
             KeyCode::Enter => {
@@ -428,6 +533,8 @@ impl App {
                     self.selected = self
                         .search_original_selected
                         .min(self.visible.len().saturating_sub(1));
+                    self.scope = self.search_original_scope;
+                    self.rebuild_visible_for_scope();
                     self.status = "Search closed without a query.".to_owned();
                 } else {
                     self.scope = Scope::Search;
@@ -491,6 +598,32 @@ impl App {
         Ok(Effect::None)
     }
 
+    fn handle_select_key(&mut self, event: KeyEvent) -> Result<Effect> {
+        if self.edit_options.is_empty() {
+            self.mode = Mode::Normal;
+            return Ok(Effect::None);
+        }
+        match event.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.edit_options.clear();
+                self.status = "已取消选择".to_owned();
+            }
+            KeyCode::Enter => self.commit_option_edit()?,
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') => {
+                self.edit_option_selected = (self.edit_option_selected + self.edit_options.len()
+                    - 1)
+                    % self.edit_options.len();
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Right | KeyCode::Char('l') => {
+                self.edit_option_selected =
+                    (self.edit_option_selected + 1) % self.edit_options.len();
+            }
+            _ => {}
+        }
+        Ok(Effect::None)
+    }
+
     fn handle_confirm_key(&mut self, event: KeyEvent) -> Result<Effect> {
         match event.code {
             KeyCode::Enter | KeyCode::Char('y') => {
@@ -515,7 +648,27 @@ impl App {
     }
 
     fn start_edit(&mut self) -> Result<Effect> {
+        if self.focus == Focus::Left && self.scope == Scope::Files {
+            let Some(file) = self.current_file().cloned() else {
+                self.status = "没有可编辑的声明文件".to_owned();
+                return Ok(Effect::None);
+            };
+            if !file.editable {
+                self.status = "该声明文件只有只读设置，不能进行 Raw 编辑".to_owned();
+                return Ok(Effect::None);
+            }
+            return self.start_raw_edit(file.path);
+        }
+        if self.focus == Focus::Left {
+            self.focus = Focus::Right;
+            self.selected_setting = 0;
+            self.status = "已选择来源；焦点移到右侧设置".to_owned();
+            return Ok(Effect::None);
+        }
         let Some(index) = self.selected_index() else {
+            if self.focus == Focus::Left {
+                self.status = "请先选择右侧设置；文件 scope 可直接编辑整份文件".to_owned();
+            }
             return Ok(Effect::None);
         };
         let entry = self.catalog.entries[index].clone();
@@ -524,32 +677,56 @@ impl App {
             return Ok(Effect::None);
         }
         if matches!(entry.value_type, ValueType::Raw) || matches!(self.view, View::Raw) {
-            if entry.source.is_system() {
-                self.status = "Raw editing of system files is disabled; use an authorized built-in or trusted Schema field."
-                    .to_owned();
+            let Some(source) = entry.source_path().map(PathBuf::from) else {
+                self.status = "运行时来源没有可打开的 Raw 文件".to_owned();
+                return Ok(Effect::None);
+            };
+            return self.start_raw_edit(source);
+        }
+        if matches!(entry.value_type, ValueType::Boolean | ValueType::Enum) {
+            self.edit_options = if entry.value_type == ValueType::Boolean {
+                vec!["true".to_owned(), "false".to_owned()]
+            } else {
+                entry
+                    .metadata
+                    .iter()
+                    .find(|(key, _)| key == "values")
+                    .map(|(_, values)| values.split('|').map(str::to_owned).collect())
+                    .unwrap_or_default()
+            };
+            if self.edit_options.is_empty() {
+                self.status = "该选项没有可用值，无法打开选项编辑".to_owned();
                 return Ok(Effect::None);
             }
-            let Some(source) = entry.source_path().map(PathBuf::from) else {
-                self.status = "Runtime sources do not have a Raw file editor.".to_owned();
-                return Ok(Effect::None);
-            };
-            let working = match self.transaction.working_copy(&source) {
-                Ok(working) => working,
-                Err(error) => {
-                    self.status = format!("Cannot prepare external edit: {error}");
-                    return Ok(Effect::None);
-                }
-            };
-            self.status = format!(
-                "Editing staged copy with external editor: {}",
-                source.display()
-            );
-            return Ok(Effect::OpenEditor { source, working });
+            self.edit_option_selected = self
+                .edit_options
+                .iter()
+                .position(|option| option == &entry.value)
+                .unwrap_or(0);
+            self.mode = Mode::Select;
+            self.focus = Focus::Right;
+            return Ok(Effect::None);
         }
         self.edit_input = entry.value;
         self.edit_cursor = self.edit_input.len();
         self.mode = Mode::Edit;
         Ok(Effect::None)
+    }
+
+    fn start_raw_edit(&mut self, source: PathBuf) -> Result<Effect> {
+        if is_system_path(&source) {
+            self.status = "系统文件的 Raw 编辑需要授权；请使用受信任的结构化字段".to_owned();
+            return Ok(Effect::None);
+        }
+        let working = match self.transaction.working_copy(&source) {
+            Ok(working) => working,
+            Err(error) => {
+                self.status = format!("无法准备外部编辑副本：{error}");
+                return Ok(Effect::None);
+            }
+        };
+        self.status = format!("正在用外部编辑器打开完整文件：{}", source.display());
+        Ok(Effect::OpenEditor { source, working })
     }
 
     fn commit_inline_edit(&mut self) -> Result<()> {
@@ -568,6 +745,29 @@ impl App {
             Err(error) => {
                 self.status = format!("Cannot stage: {error}");
             }
+        }
+        Ok(())
+    }
+
+    fn commit_option_edit(&mut self) -> Result<()> {
+        let value = self
+            .edit_options
+            .get(self.edit_option_selected)
+            .cloned()
+            .unwrap_or_default();
+        let Some(index) = self.selected_index() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        let entry = self.catalog.entries[index].clone();
+        match self.transaction.stage_entry(&entry, &value) {
+            Ok(()) => {
+                self.catalog.entries[index].value = value.clone();
+                self.status = format!("已暂存 {} = {}", entry.label, value);
+                self.mode = Mode::Normal;
+                self.edit_options.clear();
+            }
+            Err(error) => self.status = format!("无法暂存：{error}"),
         }
         Ok(())
     }
@@ -642,6 +842,10 @@ impl App {
 
     fn reload_after_apply(&mut self) {
         let selected_id = self.selected_entry().map(|entry| entry.id.clone());
+        let selected_provider = self
+            .selected_group_entry()
+            .map(|entry| entry.provider.clone());
+        let selected_file = self.current_file().map(|file| file.path.clone());
         let load = load_app_config(self.safe_mode);
         self.config = load.config;
         self.warning = load.warning;
@@ -666,12 +870,25 @@ impl App {
         refreshed.retain_stale_from(&self.catalog);
         self.catalog = refreshed;
         if self.scope == Scope::Search {
-            self.scope = Scope::Overview;
+            self.scope = Scope::Plugins;
         }
         self.rebuild_visible_for_scope();
-        self.selected = selected_id
+        self.selected = match self.scope {
+            Scope::Files => selected_file
+                .and_then(|path| self.catalog.files.iter().position(|file| file.path == path))
+                .unwrap_or(0),
+            Scope::Plugins => selected_provider
+                .and_then(|provider| {
+                    self.plugin_groups
+                        .iter()
+                        .position(|group| group.provider == provider)
+                })
+                .unwrap_or(0),
+            Scope::Search => 0,
+        };
+        self.selected_setting = selected_id
             .and_then(|id| {
-                self.visible
+                self.setting_indices()
                     .iter()
                     .position(|index| self.catalog.entries[*index].id == id)
             })
@@ -854,25 +1071,63 @@ impl App {
     }
 
     fn rebuild_visible_for_scope(&mut self) {
-        self.visible = self
-            .catalog
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| self.scope.includes(entry).then_some(index))
+        let mut plugin_representatives = std::collections::BTreeMap::<String, usize>::new();
+        for (index, entry) in self.catalog.entries.iter().enumerate() {
+            plugin_representatives
+                .entry(entry.provider.clone())
+                .or_insert(index);
+        }
+        let mut plugin_providers = plugin_representatives
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        for plugin in &self.catalog.plugins {
+            plugin_providers.insert(format!("plugin.{}", plugin.id));
+        }
+        self.plugin_groups = plugin_providers
+            .into_iter()
+            .map(|provider| PluginGroup {
+                label: plugin_representatives
+                    .get(&provider)
+                    .map(|index| self.group_label_for_entry(&self.catalog.entries[*index]))
+                    .unwrap_or_else(|| self.group_label_for_provider(&provider)),
+                representative: plugin_representatives.get(&provider).copied(),
+                provider,
+            })
             .collect();
-        self.selected = self.selected.min(self.visible.len().saturating_sub(1));
+        self.plugin_groups
+            .sort_by(|left, right| left.label.cmp(&right.label));
+        self.visible = match self.scope {
+            Scope::Plugins => self
+                .plugin_groups
+                .iter()
+                .filter_map(|group| group.representative)
+                .collect(),
+            Scope::Files => Vec::new(),
+            Scope::Search => self.visible.clone(),
+        };
+        self.file_visible = if self.scope == Scope::Files {
+            (0..self.catalog.files.len()).collect()
+        } else {
+            Vec::new()
+        };
+        self.selected = self.selected.min(self.group_count().saturating_sub(1));
+        self.selected_setting = self
+            .selected_setting
+            .min(self.setting_indices().len().saturating_sub(1));
         self.content_scroll = 0;
     }
 
     fn change_scope(&mut self, direction: isize) {
         self.scope = self.scope.shifted(direction);
         self.selected = 0;
+        self.selected_setting = 0;
+        self.focus = Focus::Left;
         self.rebuild_visible_for_scope();
         self.status = format!(
-            "Scope: {} ({} visible entries).",
+            "范围：{}（{} 个来源）",
             self.scope.label(),
-            self.visible.len()
+            self.group_count()
         );
     }
 
@@ -882,7 +1137,11 @@ impl App {
         } else {
             self.catalog.search_indices(&self.search_input)
         };
+        self.scope = Scope::Search;
+        self.file_visible.clear();
         self.selected = self.selected.min(self.visible.len().saturating_sub(1));
+        self.selected_setting = 0;
+        self.focus = Focus::Right;
         self.content_scroll = 0;
     }
 
@@ -904,12 +1163,70 @@ impl App {
     }
 
     fn move_selection(&mut self, amount: isize) {
-        if self.visible.is_empty() {
-            return;
+        if self.focus == Focus::Left {
+            let len = self.group_count();
+            if len == 0 {
+                return;
+            }
+            self.selected = ((self.selected as isize + amount).rem_euclid(len as isize)) as usize;
+            self.selected_setting = 0;
+            self.focus = Focus::Right;
+            self.status = "已选中来源；焦点移到右侧设置".to_owned();
+        } else {
+            let len = self.setting_indices().len();
+            if len == 0 {
+                return;
+            }
+            self.selected_setting =
+                ((self.selected_setting as isize + amount).rem_euclid(len as isize)) as usize;
         }
-        let len = self.visible.len() as isize;
-        self.selected = ((self.selected as isize + amount).rem_euclid(len)) as usize;
         self.content_scroll = 0;
+    }
+
+    fn group_count(&self) -> usize {
+        match self.scope {
+            Scope::Files => self.file_visible.len(),
+            Scope::Plugins => self.plugin_groups.len(),
+            Scope::Search => self.visible.len(),
+        }
+    }
+
+    fn group_label_for_entry(&self, entry: &ConfigEntry) -> String {
+        self.group_label_for_provider(&entry.provider)
+    }
+
+    fn group_label_for_provider(&self, provider: &str) -> String {
+        if provider == "reginux.self" {
+            return "Reginux · 内置".to_owned();
+        }
+        if provider.starts_with("linux.") {
+            return format!("Linux · {}", provider.trim_start_matches("linux."));
+        }
+        if let Some(id) = provider.strip_prefix("plugin.") {
+            if let Some(plugin) = self.catalog.plugins.iter().find(|plugin| plugin.id == id) {
+                return format!("{} · {}", plugin.name, plugin.kind);
+            }
+            return id.to_owned();
+        }
+        provider.to_owned()
+    }
+
+    fn group_label(&self) -> String {
+        match self.scope {
+            Scope::Files => self
+                .current_file()
+                .map(ConfigFile::display_path)
+                .unwrap_or_else(|| "没有声明文件".to_owned()),
+            Scope::Plugins => self
+                .plugin_groups
+                .get(self.selected)
+                .map(|group| group.label.clone())
+                .unwrap_or_else(|| "没有来源".to_owned()),
+            Scope::Search => self
+                .selected_group_entry()
+                .map(|entry| self.group_label_for_entry(entry))
+                .unwrap_or_else(|| "没有来源".to_owned()),
+        }
     }
 
     fn navigate_or_scroll(&mut self, amount: isize) {
@@ -972,20 +1289,18 @@ impl App {
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
         let title = format!(
-            " Reginux · {} · {}/{} entries · {} plugins · [s/]s scope ",
+            " Reginux · {} · {} 个来源 / {} 个设置 · {} 个插件 · [s]/[s] 切换范围 ",
             self.scope.label(),
-            self.visible.len(),
+            self.group_count(),
             self.catalog.entries.len(),
             self.catalog.plugins.len()
         );
         frame.render_widget(
-            Paragraph::new(title)
-                .style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .block(Block::default().borders(Borders::BOTTOM)),
+            Paragraph::new(title).style(palette::HEADER).block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(palette::PANEL),
+            ),
             area,
         );
     }
@@ -995,43 +1310,7 @@ impl App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(area);
-        let items = self
-            .visible
-            .iter()
-            .map(|index| {
-                let entry = &self.catalog.entries[*index];
-                let marker = if self.transaction.has_changes_for_entry(entry) {
-                    "*"
-                } else {
-                    " "
-                };
-                let access = if !entry.is_editable() {
-                    "R"
-                } else if entry.source.is_system() {
-                    "S"
-                } else if entry.source_path().is_none() {
-                    "A"
-                } else {
-                    "U"
-                };
-                ListItem::new(format!(
-                    "{marker} [{access}] {}  ·  {}",
-                    clean_display_text(&entry.label),
-                    clean_display_text(&entry.section)
-                ))
-            })
-            .collect::<Vec<_>>();
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .title("Configuration")
-                    .borders(Borders::ALL),
-            )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
-            .highlight_symbol("› ");
-        let mut state = ListState::default();
-        state.select(Some(self.selected));
-        frame.render_stateful_widget(list, columns[0], &mut state);
+        self.render_scope_list(frame, columns[0]);
 
         if matches!(
             self.mode,
@@ -1054,50 +1333,326 @@ impl App {
         }
     }
 
-    fn render_form(&self, frame: &mut Frame, area: Rect) {
-        let Some(entry) = self.selected_entry() else {
-            frame.render_widget(Paragraph::new("No configuration entries detected."), area);
-            return;
+    fn render_scope_list(&self, frame: &mut Frame, area: Rect) {
+        let items = match self.scope {
+            Scope::Plugins => self
+                .plugin_groups
+                .iter()
+                .map(|group| {
+                    let count = self
+                        .catalog
+                        .entries
+                        .iter()
+                        .filter(|candidate| candidate.provider == group.provider)
+                        .count();
+                    let changed = self
+                        .catalog
+                        .entries
+                        .iter()
+                        .filter(|candidate| candidate.provider == group.provider)
+                        .any(|candidate| self.transaction.has_changes_for_entry(candidate));
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            if changed { "● " } else { "  " },
+                            if changed {
+                                palette::STAGED
+                            } else {
+                                palette::MUTED
+                            },
+                        ),
+                        Span::styled(clean_display_text(&group.label), palette::PRIMARY),
+                        Span::styled(format!("  ({count})"), palette::MUTED),
+                    ]))
+                })
+                .collect::<Vec<_>>(),
+            Scope::Search => self
+                .visible
+                .iter()
+                .map(|index| {
+                    let entry = &self.catalog.entries[*index];
+                    let count = self
+                        .catalog
+                        .entries
+                        .iter()
+                        .filter(|candidate| candidate.provider == entry.provider)
+                        .count();
+                    let changed = self
+                        .catalog
+                        .entries
+                        .iter()
+                        .filter(|candidate| candidate.provider == entry.provider)
+                        .any(|candidate| self.transaction.has_changes_for_entry(candidate));
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            if changed { "● " } else { "  " },
+                            if changed {
+                                palette::STAGED
+                            } else {
+                                palette::MUTED
+                            },
+                        ),
+                        Span::styled(
+                            clean_display_text(&self.group_label_for_entry(entry)),
+                            palette::PRIMARY,
+                        ),
+                        Span::styled(format!("  ({count})"), palette::MUTED),
+                    ]))
+                })
+                .collect::<Vec<_>>(),
+            Scope::Files => self
+                .file_visible
+                .iter()
+                .filter_map(|index| self.catalog.files.get(*index))
+                .map(|file| {
+                    let changed = self
+                        .catalog
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.source_path().is_some_and(|path| path == file.path))
+                        .any(|entry| self.transaction.has_changes_for_entry(entry));
+                    let state = if file.exists { "● " } else { "◇ " };
+                    let state_style = if file.exists {
+                        palette::MUTED
+                    } else {
+                        palette::MISSING
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            if changed { "● " } else { state },
+                            if changed {
+                                palette::STAGED
+                            } else {
+                                state_style
+                            },
+                        ),
+                        Span::styled(compact_path(&file.path, 25), palette::PRIMARY),
+                    ]))
+                })
+                .collect::<Vec<_>>(),
         };
-        let mut text = format!(
-            "{}\n\n{}\n\nValue\n{}\n\nType: {}\nEdit capability: {}\nPrivilege: {}\n\nSource\n{}\n\nProvider\n{}\n\nValidation\n{}",
-            clean_display_text(&entry.label),
-            clean_display_text(&entry.description),
-            clean_terminal_text(&entry.value),
-            entry.value_type.as_str(),
-            entry.edit_capability.as_str(),
-            entry.privilege.as_str(),
-            clean_display_text(&entry.source_display()),
-            clean_display_text(&entry.provider),
-            clean_display_text(&entry.validation),
-        );
-        if let Mode::Edit = self.mode {
-            let edit_display = display_with_cursor(&self.edit_input, self.edit_cursor);
-            text = format!(
-                "{}\n\nEdit value\n{}\n\n←/→ move · Home/End · Ctrl+W delete word\nEnter stage · Esc cancel",
-                clean_display_text(&entry.label),
-                clean_terminal_text(&edit_display)
+        let title = match self.scope {
+            Scope::Plugins => "插件 · 内置与已发现插件",
+            Scope::Files => "文件 · 仅声明来源",
+            Scope::Search => "搜索结果",
+        };
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(if self.focus == Focus::Left {
+                        palette::FOCUS_LEFT
+                    } else {
+                        palette::PANEL
+                    }),
+            )
+            .highlight_style(if self.focus == Focus::Left {
+                palette::ACTIVE
+            } else {
+                palette::INACTIVE_SELECTED
+            })
+            .highlight_symbol("▸ ");
+        let mut state = ListState::default();
+        state.select((self.group_count() > 0).then_some(self.selected));
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    fn render_form(&self, frame: &mut Frame, area: Rect) {
+        let indices = self.setting_indices();
+        if indices.is_empty() {
+            let message = if self.scope == Scope::Files {
+                "该文件目前没有结构化设置；按 e 在左侧打开完整文件".to_owned()
+            } else if self.scope == Scope::Plugins {
+                self.plugin_groups
+                    .get(self.selected)
+                    .and_then(|group| {
+                        self.catalog
+                            .plugins
+                            .iter()
+                            .find(|plugin| format!("plugin.{}", plugin.id) == group.provider)
+                    })
+                    .map(|plugin| {
+                        format!(
+                            "{}\n\n状态：{}\n批准：{}\n信任：{}\n路径：{}\n\n该插件当前没有可编辑设置；如需运行时设置，请先在插件管理视图审阅其权限。",
+                            clean_display_text(&plugin.name),
+                            clean_display_text(&plugin.status),
+                            clean_display_text(&plugin.approval),
+                            clean_display_text(&plugin.trust),
+                            clean_display_text(&plugin.path.display().to_string())
+                        )
+                    })
+                    .unwrap_or_else(|| "没有可显示的设置".to_owned())
+            } else {
+                "没有可显示的设置".to_owned()
+            };
+            frame.render_widget(
+                Paragraph::new(message)
+                    .block(
+                        Block::default()
+                            .title(format!("设置 · {}", self.group_label()))
+                            .borders(Borders::ALL)
+                            .border_style(palette::PANEL),
+                    )
+                    .style(palette::PRIMARY),
+                area,
             );
+            return;
         }
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(7)])
+            .split(area);
+        let items = indices
+            .iter()
+            .map(|index| {
+                let entry = &self.catalog.entries[*index];
+                let indent = "  ".repeat(setting_depth(entry));
+                let tree_path = entry
+                    .section
+                    .split(" / ")
+                    .skip(2)
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                let value = if entry.value == "<unset>" {
+                    entry
+                        .default_value
+                        .as_deref()
+                        .map(|default| format!("<默认: {default}>"))
+                        .unwrap_or_else(|| "<未设置>".to_owned())
+                } else {
+                    clean_terminal_text(&entry.value)
+                };
+                let marker = if self.transaction.has_changes_for_entry(entry) {
+                    "● "
+                } else {
+                    "  "
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(
+                            "{}{} ",
+                            indent,
+                            if setting_depth(entry) > 0 {
+                                "└─"
+                            } else {
+                                ""
+                            }
+                        ),
+                        palette::MUTED,
+                    ),
+                    Span::styled(marker, palette::STAGED),
+                    Span::styled(
+                        if tree_path.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{tree_path} / ")
+                        },
+                        palette::MUTED,
+                    ),
+                    Span::styled(clean_display_text(&entry.label), palette::PRIMARY),
+                    Span::styled(format!("  =  {value}"), value_style(entry)),
+                    Span::styled(format!("  [{}]", entry.value_type.as_str()), palette::MUTED),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(format!("设置 · {}", self.group_label()))
+                    .borders(Borders::ALL)
+                    .border_style(if self.focus == Focus::Right {
+                        palette::FOCUS_RIGHT
+                    } else {
+                        palette::PANEL
+                    }),
+            )
+            .highlight_style(if self.focus == Focus::Right {
+                palette::ACTIVE
+            } else {
+                palette::INACTIVE_SELECTED
+            })
+            .highlight_symbol("▸ ");
+        let mut state = ListState::default();
+        state.select((!indices.is_empty()).then_some(self.selected_setting));
+        frame.render_stateful_widget(list, sections[0], &mut state);
+
+        let entry = self.selected_entry();
+        let detail = entry
+            .map(|entry| {
+                let mut text = format!(
+                    "{}\n{}\n类型：{}  编辑：{}  权限：{}\n来源：{}",
+                    clean_display_text(&entry.label),
+                    clean_display_text(&entry.description),
+                    entry.value_type.as_str(),
+                    if entry.is_editable() {
+                        "可编辑"
+                    } else {
+                        "只读"
+                    },
+                    entry.privilege.as_str(),
+                    clean_display_text(&entry.source_display()),
+                );
+                if let Mode::Edit = self.mode {
+                    text = format!(
+                        "{}\n编辑：{}\nEnter 暂存 · Esc 取消",
+                        clean_display_text(&entry.label),
+                        clean_terminal_text(&display_with_cursor(
+                            &self.edit_input,
+                            self.edit_cursor
+                        )),
+                    );
+                }
+                if let Mode::Select = self.mode {
+                    let options = self
+                        .edit_options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| {
+                            if index == self.edit_option_selected {
+                                format!("[● {option}]")
+                            } else {
+                                format!("[○ {option}]")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    text = format!(
+                        "{}\n选择：{}\n↑/↓ 或 h/l 移动 · Enter 暂存 · Esc 取消",
+                        clean_display_text(&entry.label),
+                        options
+                    );
+                }
+                text
+            })
+            .unwrap_or_else(|| "选择一个设置查看说明".to_owned());
         frame.render_widget(
-            Paragraph::new(text)
-                .block(Block::default().title("Form").borders(Borders::ALL))
+            Paragraph::new(detail)
+                .block(Block::default().title("说明").borders(Borders::ALL))
+                .style(palette::SECONDARY)
                 .wrap(Wrap { trim: false }),
-            area,
+            sections[1],
         );
     }
 
     fn render_raw(&self, frame: &mut Frame, area: Rect) {
-        let Some(entry) = self.selected_entry() else {
-            return;
-        };
-        let Some(path) = entry.source_path() else {
+        let path = self
+            .current_file()
+            .map(|file| file.path.clone())
+            .or_else(|| {
+                self.selected_entry()
+                    .and_then(|entry| entry.source_path().map(PathBuf::from))
+            });
+        let Some(path) = path else {
             frame.render_widget(
                 Paragraph::new(format!(
-                    "Runtime source\n\n{}\n\nRaw file editing is unavailable. Press r to refresh the declared provider.",
-                    clean_display_text(&entry.source_display())
+                    "运行时来源\n\n{}\n\n没有可打开的 Raw 文件；按 r 刷新已声明来源。",
+                    clean_display_text(&self.group_label())
                 ))
-                .block(Block::default().title("Raw · runtime source").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title("Raw · 运行时来源")
+                        .borders(Borders::ALL),
+                )
                 .wrap(Wrap { trim: false }),
                 area,
             );
@@ -1105,7 +1660,7 @@ impl App {
         };
         let content = self
             .transaction
-            .content_for(path)
+            .content_for(&path)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_else(|error| {
                 format!(
@@ -1114,6 +1669,7 @@ impl App {
                     clean_display_text(&error.to_string())
                 )
             });
+        let missing = !path.exists();
         let content = clean_terminal_text(&content);
         let scroll = clamped_scroll(&content, area, self.content_scroll);
         frame.render_widget(
@@ -1121,10 +1677,20 @@ impl App {
                 .block(
                     Block::default()
                         .title(format!(
-                            "Raw: {}",
+                            "Raw{}: {}",
+                            if missing {
+                                " · 默认路径，不存在"
+                            } else {
+                                ""
+                            },
                             clean_display_text(&path.display().to_string())
                         ))
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_style(if missing {
+                            palette::MISSING
+                        } else {
+                            palette::FOCUS_RIGHT
+                        }),
                 )
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0)),
@@ -1359,6 +1925,7 @@ impl App {
             Mode::Normal => "NORMAL",
             Mode::Search => "SEARCH",
             Mode::Edit => "EDIT",
+            Mode::Select => "选择",
             Mode::ConfirmApply
             | Mode::ConfirmDiscard
             | Mode::ConfirmQuit
@@ -1366,16 +1933,17 @@ impl App {
             | Mode::ConfirmPluginRevoke => "CONFIRM",
         };
         let view = match self.view {
-            View::Form => "Form",
+            View::Form => "设置",
             View::Raw => "Raw",
-            View::Diff => "Diff",
-            View::Info => "Info",
-            View::Help => "Help",
-            View::Plugins => "Plugins",
+            View::Diff => "差异",
+            View::Info => "详情",
+            View::Help => "帮助",
+            View::Plugins => "插件管理",
         };
         let source = self
             .selected_entry()
             .map(|entry| clean_display_text(&entry.source_display()))
+            .or_else(|| self.current_file().map(ConfigFile::display_path))
             .unwrap_or_else(|| "-".to_owned());
         let status = match self.mode {
             Mode::Search => format!(
@@ -1386,6 +1954,7 @@ impl App {
                 "Edit: {}",
                 display_with_cursor(&self.edit_input, self.edit_cursor)
             ),
+            Mode::Select => "↑/↓ 选择 · Enter 暂存 · Esc 取消".to_owned(),
             Mode::ConfirmApply => "Review impact · Enter/y Apply · Esc/n Cancel".to_owned(),
             Mode::ConfirmDiscard => "Enter/y Discard · Esc/n Cancel".to_owned(),
             Mode::ConfirmQuit => "Enter/y Quit · Esc/n Cancel".to_owned(),
@@ -1394,12 +1963,21 @@ impl App {
             Mode::Normal => clean_terminal_text(&self.status),
         };
         let hint = if self.config.interface.show_key_hints && matches!(self.mode, Mode::Normal) {
-            self.keymap.hints_contexts(self.active_contexts())
+            if self.view == View::Form {
+                "h/l 焦点   j/k 导航   Enter 激活   e 编辑   d 差异   i 详情   [s/]s 范围"
+                    .to_owned()
+            } else {
+                self.keymap.hints_contexts(self.active_contexts())
+            }
         } else {
             String::new()
         };
         let first = format!(
-            " {mode} │ {view} │ {} staged │ {status} │ {source}",
+            " {mode} │ {view} │ 焦点:{} │ {} staged │ {status} │ {source}",
+            match self.focus {
+                Focus::Left => "左侧",
+                Focus::Right => "右侧",
+            },
             self.transaction.changed_count(),
         );
         let second = if hint.is_empty() {
@@ -1412,6 +1990,75 @@ impl App {
             Line::from(Span::styled(second, Style::default().fg(Color::DarkGray))),
         ];
         frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+mod palette {
+    use ratatui::style::{Color, Modifier, Style};
+
+    pub const ACTIVE: Style = Style::new()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    pub const INACTIVE_SELECTED: Style = Style::new()
+        .fg(Color::White)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+    pub const HEADER: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    pub const PRIMARY: Style = Style::new().fg(Color::White);
+    pub const SECONDARY: Style = Style::new().fg(Color::Gray);
+    pub const MUTED: Style = Style::new().fg(Color::DarkGray);
+    pub const STAGED: Style = Style::new().fg(Color::Yellow);
+    pub const MISSING: Style = Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    pub const PANEL: Style = Style::new().fg(Color::DarkGray);
+    pub const FOCUS_LEFT: Style = Style::new().fg(Color::Yellow);
+    pub const FOCUS_RIGHT: Style = Style::new().fg(Color::Cyan);
+}
+
+fn setting_depth(entry: &ConfigEntry) -> usize {
+    entry.section.split(" / ").count().saturating_sub(2).min(4)
+}
+
+fn value_style(entry: &ConfigEntry) -> Style {
+    if entry.value == "<unset>" {
+        palette::MISSING
+    } else if entry.value_type == ValueType::Secret {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::Green)
+    }
+}
+
+fn compact_path(path: &Path, width: usize) -> String {
+    let display = clean_display_text(&path.display().to_string());
+    if display.chars().count() <= width {
+        return display;
+    }
+    let mut suffix = String::new();
+    for component in path.components().rev() {
+        let part = component.as_os_str().to_string_lossy();
+        let candidate = if suffix.is_empty() {
+            part.to_string()
+        } else {
+            format!("{part}/{suffix}")
+        };
+        if candidate.chars().count() + 2 > width {
+            break;
+        }
+        suffix = candidate;
+    }
+    if suffix.is_empty() {
+        let tail = display
+            .chars()
+            .rev()
+            .take(width.saturating_sub(2))
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        format!("…{tail}")
+    } else {
+        format!("…/{suffix}")
     }
 }
 
@@ -1688,10 +2335,10 @@ mod tests {
     }
 
     #[test]
-    fn scope_navigation_skips_the_transient_search_scope() {
-        assert_eq!(Scope::Overview.shifted(1), Scope::System);
-        assert_eq!(Scope::Overview.shifted(-1), Scope::ConfigFiles);
-        assert_eq!(Scope::Search.shifted(1), Scope::Overview);
+    fn scope_navigation_switches_between_plugins_and_declared_files() {
+        assert_eq!(Scope::Plugins.shifted(1), Scope::Files);
+        assert_eq!(Scope::Plugins.shifted(-1), Scope::Files);
+        assert_eq!(Scope::Search.shifted(1), Scope::Plugins);
     }
 
     #[test]
@@ -1700,5 +2347,11 @@ mod tests {
             clean_terminal_text("\u{1b}[31mvalue\r\n\tsecond"),
             "[31mvalue\n\tsecond"
         );
+    }
+
+    #[test]
+    fn compact_path_keeps_the_distinguishing_tail() {
+        let path = Path::new("/home/example/.config/reginux/config.toml");
+        assert_eq!(compact_path(path, 25), "…/reginux/config.toml");
     }
 }
