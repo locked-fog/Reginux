@@ -537,7 +537,11 @@ fn load_schema(_directory: &Path, manifest: &Manifest) -> Result<Vec<ConfigEntry
                         .unwrap_or("Declarative configuration field."),
                 ),
                 value: display_value(&value, sensitive),
-                default_value: field.default.as_ref().map(toml_value_to_string),
+                default_value: if sensitive {
+                    None
+                } else {
+                    field.default.as_ref().map(toml_value_to_string)
+                },
                 value_type: if sensitive {
                     ValueType::Secret
                 } else {
@@ -1033,7 +1037,7 @@ fn adapter_binding(
                 .ok_or_else(|| anyhow!("unknown verification operation {id}"))?;
             Ok::<AdapterVerification, anyhow::Error>(AdapterVerification {
                 invocation: operation_invocation(transport, spec, record)?,
-                expected_stdout: operation
+                expected_stdout: spec
                     .expected_stdout
                     .clone()
                     .unwrap_or_else(|| "${value}".to_owned()),
@@ -1095,6 +1099,7 @@ fn load_transform(
                 .as_deref()
                 .ok_or_else(|| anyhow!("transform field {section_id}.{field_id} has no binding"))?;
             let value_type = parse_value_type(&field.value_type)?;
+            let sensitive = field.sensitive || value_type == ValueType::Secret;
             let Some(binding) = decoded.bindings.get(binding_id) else {
                 let source_id = field.source.as_deref().ok_or_else(|| {
                     anyhow!("unresolved transform field {section_id}.{field_id} has no source")
@@ -1121,7 +1126,11 @@ fn load_transform(
                             .unwrap_or("Dynamic expression could not be safely resolved."),
                     ),
                     value: "<dynamic/unavailable>".to_owned(),
-                    default_value: field.default.as_ref().map(toml_value_to_string),
+                    default_value: if sensitive {
+                        None
+                    } else {
+                        field.default.as_ref().map(toml_value_to_string)
+                    },
                     value_type,
                     source: SourceRef::file(
                         source_id.to_owned(),
@@ -1144,7 +1153,6 @@ fn load_transform(
                 .ok_or_else(|| anyhow!("binding {binding_id} references unknown source"))?;
             validate_range(&document.contents, binding.range.start, binding.range.end)?;
             let value = json_value_to_string(&binding.value);
-            let sensitive = field.sensitive || value_type == ValueType::Secret;
             let mut metadata = field_metadata(field);
             metadata.push(("plugin_type".to_owned(), "transform".to_owned()));
             metadata.push(("binding".to_owned(), binding_id.to_owned()));
@@ -1193,7 +1201,11 @@ fn load_transform(
                         .unwrap_or("Field decoded by a sandboxed Lua transform."),
                 ),
                 value: display_value(&value, sensitive),
-                default_value: field.default.as_ref().map(toml_value_to_string),
+                default_value: if sensitive {
+                    None
+                } else {
+                    field.default.as_ref().map(toml_value_to_string)
+                },
                 value_type: if sensitive {
                     ValueType::Secret
                 } else {
@@ -2073,6 +2085,8 @@ fn invoke_command(invocation: &CommandInvocation) -> Result<Vec<u8>> {
 
 fn sandbox_launcher() -> Result<PathBuf> {
     let current = std::env::current_exe().context("locate Reginux executable")?;
+    let current_metadata = fs::symlink_metadata(&current)
+        .with_context(|| format!("inspect current executable {}", current.display()))?;
     let mut candidates = Vec::new();
     if let Some(parent) = current.parent() {
         candidates.push(parent.join("reginux-sandbox"));
@@ -2085,6 +2099,7 @@ fn sandbox_launcher() -> Result<PathBuf> {
     for candidate in candidates {
         if candidate.exists() {
             reject_symlink_components(&candidate)?;
+            validate_sandbox_launcher(&candidate, &current_metadata)?;
             return Ok(candidate);
         }
     }
@@ -2092,6 +2107,36 @@ fn sandbox_launcher() -> Result<PathBuf> {
         "mandatory reginux-sandbox launcher is not installed beside {}",
         current.display()
     )
+}
+
+fn validate_sandbox_launcher(path: &Path, current_metadata: &fs::Metadata) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect sandbox launcher {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("sandbox launcher {} is not a regular file", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if metadata.uid() != current_metadata.uid() {
+            bail!(
+                "sandbox launcher {} is not owned by the current executable owner",
+                path.display()
+            );
+        }
+        let mode = metadata.permissions().mode();
+        if mode & 0o111 == 0 {
+            bail!("sandbox launcher {} is not executable", path.display());
+        }
+        if mode & 0o022 != 0 {
+            bail!(
+                "sandbox launcher {} is group/world writable",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn invoke_adapter(invocation: &AdapterInvocation) -> Result<Vec<u8>> {
@@ -2577,6 +2622,7 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
         }
         _ => {}
     }
+    validate_node_identifiers(&manifest.nodes)?;
     for (source_id, source) in &manifest.sources {
         validate_identifier(source_id, "source id")?;
         validate_source_spec(source)?;
@@ -2614,6 +2660,24 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     }
     if manifest.plugin.kind == PluginKind::Adapter {
         validate_adapter_manifest(manifest)?;
+    }
+    Ok(())
+}
+
+fn validate_node_identifiers(nodes: &[NodeSpec]) -> Result<()> {
+    let mut node_ids = HashSet::new();
+    for node in nodes {
+        validate_identifier(&node.id, "node id")?;
+        if !node_ids.insert(&node.id) {
+            bail!("duplicate node id {}", node.id);
+        }
+        let mut field_ids = HashSet::new();
+        for field in &node.fields {
+            validate_identifier(&field.id, "node field id")?;
+            if !field_ids.insert(&field.id) {
+                bail!("duplicate node field id {} in node {}", field.id, node.id);
+            }
+        }
     }
     Ok(())
 }
@@ -3767,6 +3831,7 @@ scope = "user"
 source = "main"
 key = "token"
 type = "secret"
+default = "manifest-secret"
 "#,
         )
         .unwrap();
@@ -3785,6 +3850,7 @@ type = "secret"
         let (_, entries, _) = loaded.unwrap();
         assert_eq!(entries[0].value, "••••••");
         assert_eq!(entries[0].value_type, ValueType::Secret);
+        assert!(entries[0].default_value.is_none());
         assert_eq!(entries[0].edit_capability, EditCapability::None);
         assert!(!entries[0].searchable_text().contains("visible-secret"));
         assert!(Transaction::default()
@@ -3892,6 +3958,107 @@ operation = "set"
     }
 
     #[test]
+    fn adapter_verification_uses_referenced_operation_expected_stdout() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+schema_version = 1
+[plugin]
+id = "org.reginux.test.verify"
+name = "Verify Test"
+version = "1.0.0"
+kind = "adapter"
+[operations.set]
+args = ["${value}"]
+precondition = "pre"
+verify = "verify"
+expected_stdout = "set-operation-output"
+[operations.pre]
+args = []
+expected_stdout = "${old_value}"
+[operations.verify]
+args = []
+expected_stdout = "verify-operation-output"
+"#,
+        )
+        .unwrap();
+        let transport = LoadedTransport::Command {
+            program: PathBuf::from("/usr/bin/true"),
+            digest: "sha256:test".to_owned(),
+            read_paths: Vec::new(),
+            network: NetworkAccess::None,
+        };
+
+        let binding = adapter_binding(&manifest, &transport, "set", &Value::Null).unwrap();
+        assert_eq!(
+            binding.verification.unwrap().expected_stdout,
+            "verify-operation-output"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_duplicate_node_ids() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+schema_version = 1
+[plugin]
+id = "org.reginux.test.duplicate-node"
+name = "Duplicate Node Test"
+version = "1.0.0"
+kind = "adapter"
+[transport]
+kind = "command"
+program = "/usr/bin/true"
+[operations.snapshot]
+args = []
+[[nodes]]
+id = "item"
+kind = "group"
+[[nodes]]
+id = "item"
+kind = "group"
+"#,
+        )
+        .unwrap();
+        let error = validate_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("duplicate node id"));
+    }
+
+    #[test]
+    fn manifest_rejects_duplicate_node_field_ids() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+schema_version = 1
+[plugin]
+id = "org.reginux.test.duplicate-field"
+name = "Duplicate Field Test"
+version = "1.0.0"
+kind = "adapter"
+[transport]
+kind = "command"
+program = "/usr/bin/true"
+[operations.snapshot]
+args = []
+[[nodes]]
+id = "item"
+kind = "group"
+[[nodes.fields]]
+id = "state"
+label = "State"
+type = "string"
+value = "/state"
+[[nodes.fields]]
+id = "state"
+label = "State again"
+type = "string"
+value = "/state"
+"#,
+        )
+        .unwrap();
+        let error = validate_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("duplicate node field id"));
+    }
+
+    #[test]
     fn adapter_commands_receive_only_the_safe_environment() {
         if !command_sandbox_available() {
             return;
@@ -3910,6 +4077,27 @@ operation = "set"
         assert!(output.contains("LANG=C.UTF-8"));
         assert!(!output.contains("HOME="));
         assert!(!output.contains("TOKEN="));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_launcher_rejects_group_writable_installations() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fixture("sandbox-launcher-integrity");
+        fs::create_dir_all(&root).unwrap();
+        let launcher = root.join("reginux-sandbox");
+        fs::write(&launcher, b"verified launcher").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o777)).unwrap();
+        let current = fs::symlink_metadata(std::env::current_exe().unwrap()).unwrap();
+        let error = validate_sandbox_launcher(&launcher, &current)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("group/world writable"));
+
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        validate_sandbox_launcher(&launcher, &current).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4227,22 +4415,22 @@ end
             requests_tx.send(second_request).unwrap();
             second.write_all(b"restored\n").unwrap();
         });
-        let socket = |request: &str| {
+        let socket = |request: &str, timeout_ms| {
             AdapterInvocation::Socket(SocketInvocation {
                 endpoint: endpoint.clone(),
                 request: request.to_owned(),
                 framing: SocketFraming::Line,
                 expected_peer_uid: unsafe { libc::geteuid() },
-                timeout_ms: 50,
+                timeout_ms,
             })
         };
         let binding = AdapterBinding {
             plugin_id: "test".to_owned(),
             operation_id: "apply".to_owned(),
-            invocation: socket("apply ${value}"),
+            invocation: socket("apply ${value}", 50),
             precondition: None,
             validation: None,
-            compensation: Some(socket("restore ${old_value}")),
+            compensation: Some(socket("restore ${old_value}", 500)),
             verification: None,
             guarantee: TransactionGuarantee::Compensatable,
             scope: SourceScope::User,
