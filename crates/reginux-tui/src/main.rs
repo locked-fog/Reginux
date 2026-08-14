@@ -97,6 +97,37 @@ impl Scope {
 enum Focus {
     Left,
     Right,
+    Detail,
+}
+
+fn focus_after_activation(focus: Focus) -> Focus {
+    match focus {
+        Focus::Left => Focus::Right,
+        Focus::Right | Focus::Detail => Focus::Detail,
+    }
+}
+
+fn advance_selection(
+    focus: Focus,
+    selected: usize,
+    selected_setting: usize,
+    group_count: usize,
+    setting_count: usize,
+    amount: isize,
+) -> (Focus, usize, usize) {
+    match focus {
+        Focus::Left if group_count > 0 => (
+            Focus::Left,
+            (selected as isize + amount).rem_euclid(group_count as isize) as usize,
+            0,
+        ),
+        Focus::Right if setting_count > 0 => (
+            Focus::Right,
+            selected,
+            (selected_setting as isize + amount).rem_euclid(setting_count as isize) as usize,
+        ),
+        Focus::Left | Focus::Right | Focus::Detail => (focus, selected, selected_setting),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -403,11 +434,13 @@ impl App {
             "navigation.up" => self.navigate_or_scroll(-1),
             "navigation.top" => {
                 if self.view == View::Form {
-                    if self.focus == Focus::Left {
-                        self.selected = 0;
-                        self.selected_setting = 0;
-                    } else {
-                        self.selected_setting = 0;
+                    match self.focus {
+                        Focus::Left => {
+                            self.selected = 0;
+                            self.selected_setting = 0;
+                        }
+                        Focus::Right => self.selected_setting = 0,
+                        Focus::Detail => self.content_scroll = 0,
                     }
                 } else if self.view == View::Plugins {
                     self.plugin_selected = 0;
@@ -417,11 +450,15 @@ impl App {
             }
             "navigation.bottom" => {
                 if self.view == View::Form {
-                    if self.focus == Focus::Left {
-                        self.selected = self.group_count().saturating_sub(1);
-                        self.selected_setting = 0;
-                    } else {
-                        self.selected_setting = self.setting_indices().len().saturating_sub(1);
+                    match self.focus {
+                        Focus::Left => {
+                            self.selected = self.group_count().saturating_sub(1);
+                            self.selected_setting = 0;
+                        }
+                        Focus::Right => {
+                            self.selected_setting = self.setting_indices().len().saturating_sub(1)
+                        }
+                        Focus::Detail => self.content_scroll = u16::MAX,
                     }
                 } else if self.view == View::Plugins {
                     self.plugin_selected = self.catalog.plugins.len().saturating_sub(1);
@@ -434,23 +471,19 @@ impl App {
             "navigation.left" => {
                 if self.view == View::Form {
                     self.focus = Focus::Left;
-                    self.status = "焦点：左侧插件/文件列表".to_owned();
                 } else {
                     self.view = View::Form;
                     self.focus = Focus::Left;
                     self.content_scroll = 0;
-                    self.status = "已返回设置视图；焦点在左侧列表".to_owned();
                 }
             }
             "navigation.right" => {
                 if self.view == View::Form {
                     self.focus = Focus::Right;
-                    self.status = "焦点：右侧设置；e 编辑，Enter 激活".to_owned();
                 } else {
                     self.view = View::Form;
                     self.focus = Focus::Right;
                     self.content_scroll = 0;
-                    self.status = "已返回设置视图；焦点在右侧设置".to_owned();
                 }
             }
             "navigation.activate" => {
@@ -460,8 +493,8 @@ impl App {
                 } else if self.view == View::Form && self.focus == Focus::Left {
                     self.focus = Focus::Right;
                     self.selected_setting = 0;
-                    self.status = "已选择；焦点移到右侧设置".to_owned();
                 } else if self.view == View::Form {
+                    self.focus = focus_after_activation(self.focus);
                     return self.start_edit();
                 }
             }
@@ -657,12 +690,12 @@ impl App {
                 self.status = "该声明文件只有只读设置，不能进行 Raw 编辑".to_owned();
                 return Ok(Effect::None);
             }
+            self.focus = Focus::Detail;
             return self.start_raw_edit(file.path);
         }
         if self.focus == Focus::Left {
             self.focus = Focus::Right;
             self.selected_setting = 0;
-            self.status = "已选择来源；焦点移到右侧设置".to_owned();
             return Ok(Effect::None);
         }
         let Some(index) = self.selected_index() else {
@@ -673,6 +706,7 @@ impl App {
         };
         let entry = self.catalog.entries[index].clone();
         if !entry.is_editable() {
+            self.focus = Focus::Detail;
             self.status = "This entry is read-only.".to_owned();
             return Ok(Effect::None);
         }
@@ -681,6 +715,7 @@ impl App {
                 self.status = "运行时来源没有可打开的 Raw 文件".to_owned();
                 return Ok(Effect::None);
             };
+            self.focus = Focus::Detail;
             return self.start_raw_edit(source);
         }
         if matches!(entry.value_type, ValueType::Boolean | ValueType::Enum) {
@@ -704,12 +739,13 @@ impl App {
                 .position(|option| option == &entry.value)
                 .unwrap_or(0);
             self.mode = Mode::Select;
-            self.focus = Focus::Right;
+            self.focus = Focus::Detail;
             return Ok(Effect::None);
         }
         self.edit_input = entry.value;
         self.edit_cursor = self.edit_input.len();
         self.mode = Mode::Edit;
+        self.focus = Focus::Detail;
         Ok(Effect::None)
     }
 
@@ -1163,23 +1199,17 @@ impl App {
     }
 
     fn move_selection(&mut self, amount: isize) {
-        if self.focus == Focus::Left {
-            let len = self.group_count();
-            if len == 0 {
-                return;
-            }
-            self.selected = ((self.selected as isize + amount).rem_euclid(len as isize)) as usize;
-            self.selected_setting = 0;
-            self.focus = Focus::Right;
-            self.status = "已选中来源；焦点移到右侧设置".to_owned();
-        } else {
-            let len = self.setting_indices().len();
-            if len == 0 {
-                return;
-            }
-            self.selected_setting =
-                ((self.selected_setting as isize + amount).rem_euclid(len as isize)) as usize;
-        }
+        let (focus, selected, selected_setting) = advance_selection(
+            self.focus,
+            self.selected,
+            self.selected_setting,
+            self.group_count(),
+            self.setting_indices().len(),
+            amount,
+        );
+        self.focus = focus;
+        self.selected = selected;
+        self.selected_setting = selected_setting;
         self.content_scroll = 0;
     }
 
@@ -1231,7 +1261,17 @@ impl App {
 
     fn navigate_or_scroll(&mut self, amount: isize) {
         if self.view == View::Form {
-            self.move_selection(amount);
+            if self.focus == Focus::Detail {
+                if amount.is_negative() {
+                    self.content_scroll = self
+                        .content_scroll
+                        .saturating_sub(amount.unsigned_abs() as u16);
+                } else {
+                    self.content_scroll = self.content_scroll.saturating_add(amount as u16);
+                }
+            } else {
+                self.move_selection(amount);
+            }
         } else if self.view == View::Plugins {
             if self.catalog.plugins.is_empty() {
                 return;
@@ -1625,10 +1665,26 @@ impl App {
                 text
             })
             .unwrap_or_else(|| "选择一个设置查看说明".to_owned());
+        let detail_title = entry
+            .map(|entry| format!("详情 · {}", clean_display_text(&entry.label)))
+            .unwrap_or_else(|| "详情".to_owned());
         frame.render_widget(
             Paragraph::new(detail)
-                .block(Block::default().title("说明").borders(Borders::ALL))
-                .style(palette::SECONDARY)
+                .block(
+                    Block::default()
+                        .title(detail_title)
+                        .borders(Borders::ALL)
+                        .border_style(if self.focus == Focus::Detail {
+                            palette::FOCUS_DETAIL
+                        } else {
+                            palette::PANEL
+                        }),
+                )
+                .style(if self.focus == Focus::Detail {
+                    palette::DETAIL_ACTIVE
+                } else {
+                    palette::SECONDARY
+                })
                 .wrap(Wrap { trim: false }),
             sections[1],
         );
@@ -1964,7 +2020,7 @@ impl App {
         };
         let hint = if self.config.interface.show_key_hints && matches!(self.mode, Mode::Normal) {
             if self.view == View::Form {
-                "h/l 焦点   j/k 导航   Enter 激活   e 编辑   d 差异   i 详情   [s/]s 范围"
+                "h/l 切换面板   j/k 导航   Enter 详情/编辑   e 编辑   d 差异   i 详情   [s/]s 范围"
                     .to_owned()
             } else {
                 self.keymap.hints_contexts(self.active_contexts())
@@ -1973,11 +2029,7 @@ impl App {
             String::new()
         };
         let first = format!(
-            " {mode} │ {view} │ 焦点:{} │ {} staged │ {status} │ {source}",
-            match self.focus {
-                Focus::Left => "左侧",
-                Focus::Right => "右侧",
-            },
+            " {mode} │ {view} │ {} staged │ {status} │ {source}",
             self.transaction.changed_count(),
         );
         let second = if hint.is_empty() {
@@ -2013,6 +2065,11 @@ mod palette {
     pub const PANEL: Style = Style::new().fg(Color::DarkGray);
     pub const FOCUS_LEFT: Style = Style::new().fg(Color::Yellow);
     pub const FOCUS_RIGHT: Style = Style::new().fg(Color::Cyan);
+    pub const FOCUS_DETAIL: Style = Style::new().fg(Color::Green);
+    pub const DETAIL_ACTIVE: Style = Style::new()
+        .fg(Color::Black)
+        .bg(Color::Green)
+        .add_modifier(Modifier::BOLD);
 }
 
 fn setting_depth(entry: &ConfigEntry) -> usize {
@@ -2339,6 +2396,43 @@ mod tests {
         assert_eq!(Scope::Plugins.shifted(1), Scope::Files);
         assert_eq!(Scope::Plugins.shifted(-1), Scope::Files);
         assert_eq!(Scope::Search.shifted(1), Scope::Plugins);
+    }
+
+    #[test]
+    fn vertical_navigation_stays_in_the_focused_list() {
+        let mut focus = Focus::Left;
+        let mut selected = 0;
+        let mut selected_setting = 0;
+
+        for _ in 0..4 {
+            (focus, selected, selected_setting) =
+                advance_selection(focus, selected, selected_setting, 5, 3, 1);
+        }
+
+        assert_eq!(focus, Focus::Left);
+        assert_eq!(selected, 4);
+        assert_eq!(selected_setting, 0);
+    }
+
+    #[test]
+    fn setting_navigation_keeps_focus_on_the_setting_list() {
+        let (focus, selected, selected_setting) = advance_selection(Focus::Right, 2, 0, 5, 4, 1);
+
+        assert_eq!(focus, Focus::Right);
+        assert_eq!(selected, 2);
+        assert_eq!(selected_setting, 1);
+    }
+
+    #[test]
+    fn activating_a_setting_moves_focus_to_the_detail_panel() {
+        assert_eq!(focus_after_activation(Focus::Left), Focus::Right);
+        assert_eq!(focus_after_activation(Focus::Right), Focus::Detail);
+        assert_eq!(focus_after_activation(Focus::Detail), Focus::Detail);
+
+        let (focus, selected, selected_setting) = advance_selection(Focus::Detail, 2, 1, 5, 4, 1);
+        assert_eq!(focus, Focus::Detail);
+        assert_eq!(selected, 2);
+        assert_eq!(selected_setting, 1);
     }
 
     #[test]
