@@ -107,8 +107,9 @@ PY
 
 source_archive="$output_dir/reginux-$version-source.tar.gz"
 binary_archive="$output_dir/reginux-$version-linux-$arch.tar.gz"
-git archive --format=tar.gz --prefix="reginux-$version/" -o "$source_archive" HEAD
-tar -C "$stage_dir" -czf "$binary_archive" "reginux-$version"
+git archive --format=tar --prefix="reginux-$version/" HEAD | gzip -n > "$source_archive"
+tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+  -C "$stage_dir" -cf - "reginux-$version" | gzip -n > "$binary_archive"
 cp "$sbom_path" "$output_dir/reginux-$version-sbom.cdx.json"
 cp "$archive_root/share/reginux/manifest.json" "$output_dir/reginux-$version-manifest.json"
 
