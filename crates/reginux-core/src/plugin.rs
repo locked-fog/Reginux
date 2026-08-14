@@ -4512,9 +4512,26 @@ end
     #[test]
     fn bundled_examples_are_valid_v1_plugins() {
         let _environment = ENVIRONMENT_LOCK.lock().unwrap();
+        let root = fixture("bundled-examples");
+        fs::create_dir_all(&root).unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_config = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", &root);
+        std::env::set_var("XDG_CONFIG_HOME", root.join(".config"));
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/examples");
         let discovery =
             discover_plugins(&[examples.display().to_string()], &PluginPolicy::default());
+        if let Some(value) = old_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = old_config {
+            std::env::set_var("XDG_CONFIG_HOME", value);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        fs::remove_dir_all(root).unwrap();
         let ids = discovery
             .summaries
             .iter()

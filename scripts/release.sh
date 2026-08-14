@@ -34,8 +34,8 @@ if [ -d "$output_dir" ] && find "$output_dir" -mindepth 1 -maxdepth 1 -print -qu
 fi
 mkdir -p "$output_dir"
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  printf '%s\n' 'error: release requires a clean Git working tree' >&2
+if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
+  printf '%s\n' 'error: release requires a clean Git working tree with no untracked files' >&2
   exit 1
 fi
 
